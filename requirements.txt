@@ -1,0 +1,6 @@
+PySide6
+fastapi
+uvicorn
+requests
+pydantic
+PyInstaller
