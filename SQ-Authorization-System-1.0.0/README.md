@@ -201,7 +201,7 @@ python build.py
 - 回归测试：`tests/test_theme_dark_mode.py`（深色调色板被覆盖、滚动无黑带、四个端的滚动内容层均不透明）；扫描工具 `python tools/dark_mode_sweep.py` 覆盖四个端所有页面与滚动位置。
 - 控制台：服务器 exe 双击运行时隐藏自带控制台窗口；从 cmd / Windows Terminal 启动不会隐藏终端窗口（`--show-console` 可强制保留）。
 
-### 发布完整性自校验（C1）
+### 发布完整性自校验
 
 - 构建时 `build.py` 会生成/复用发布密钥对（`release_keys/release_key.json`，已加入 `.gitignore`，**必须离线备份**，泄露等于泄露签名能力），并在打包前把公钥固定进四个 exe。
 - `python build.py` 完成后输出：`dist/release_manifest.json`、`dist/release_manifest.sig`、`dist/releases/` 副本，并打印公钥指纹。
@@ -211,7 +211,7 @@ python build.py
 - 发布密钥轮换会使旧 exe 无法通过新清单校验，必须配合版本升级与灰度发布；操作细节见 `docs/RELEASE-SIGNING.md`。
 - 验收命令：`python tools/verify_integrity_e2e.py`（验签、篡改拒绝、真实 attest 门禁全链路）。
 
-### 邮箱账号与邮件告警（P1）
+### 邮箱账号与邮件告警
 
 - SMTP 配置：打开 **本地服务器** → 设置 → SMTP 分组，填写主机/端口/账号/密码/发件邮箱/STARTTLS/SSL/超时与管理员告警收件邮箱。保存后需重启本地服务器生效；"发送测试邮件"可立即验证通道。
 - 管理员邮箱：主控端"管理员管理"可为账号设置邮箱并输入验证码；登录框新增"忘记密码"，通过邮箱验证码重置密码。
@@ -221,7 +221,7 @@ python build.py
 - 邮件队列：所有通知写 `email_outbox`，后台 worker 每 5 秒投递，失败按指数退避重试（最多 5 次后进 dead），不会阻塞请求；投递记录见 `GET /api/email/outbox`。
 - 验收命令：`python tools/verify_mail_e2e.py`（内置假 SMTP，覆盖注册/验证/找回密码/绑定/续费全链路）。
 
-### 告警中心与多渠道通知（A5/A7）
+### 告警中心与多渠道通知
 
 - 管理端/主控端新增 **告警中心** 导航：
   - **告警规则**：7 个内置指标（激活率、在线并发、过期率、7 天内到期、激活失败、风控事件、完整性告警），可配置运算符、阈值、统计窗口、级别、冷却时间、通知渠道与启停。
@@ -233,7 +233,7 @@ python build.py
   - `python tools/verify_channels_e2e.py`（规则 → channel_outbox → 真实 HTTP 投递 + HMAC 校验）
   - `python tools/verify_mail_e2e.py`（含 A5 规则触发与邮件通知链路）
 
-### 用户资料、用户管理与 Python SDK（缺陷修复批次）
+### 用户资料、用户管理与 Python SDK
 
 - 验证端邮箱模式：登录后显示头像、显示名与邮箱；"编辑资料"支持修改名称、上传/移除头像（png/jpg/webp，≤256KB）。
 - 管理端/主控端新增 **用户管理**：搜索邮箱注册用户、查看绑定与许可证状态、启用/禁用、强制脱绑。两端界面已区分：管理端=密钥运营（无"管理员管理/系统设置"），主控端=系统管理。
@@ -258,6 +258,7 @@ python build.py
   - `require_manifest_hash`（默认 false）：设为 true 时 attest 必须携带非空 `manifest_sha256`（适合全量分发清单的模式；会使验证端 standalone 无法通过 attest）。
   - `channel_allow_private_hosts`（默认 false）：允许通知渠道指向内网/本机地址（内网 Webhook 场景才打开）。
 - 对抗审计与修复记录见 `docs/SELF-AUDIT.md`；旧密钥与旧数据已备份到 `backup_secrets_20261008/`，切勿随包分发。
+- 完整的功能与修复明细见仓库内 `CHANGELOG.md`。
 
 ### 登录记忆与首次引导
 
