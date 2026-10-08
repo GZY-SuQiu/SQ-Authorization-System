@@ -1,0 +1,44 @@
+{
+  "format": "sq-release-manifest-v1",
+  "version": "1.0.0",
+  "release_id": "35dff5c915f1ae057d38db75dce380eb",
+  "generated_at": "2026-10-08T21:21:11+08:00",
+  "apps": {
+    "server": {
+      "path": "本地服务器.exe",
+      "sha256": "85b34311b64af5f77bb96473a4cc04d826a0e2ccb7447be4fb57ca241f08add7",
+      "size": 60273988
+    },
+    "admin": {
+      "path": "管理端.exe",
+      "sha256": "3b57fdef0a6a4729ab7d8691c6c6180a21851e61c1ac2c0dea737f838286d670",
+      "size": 55205004
+    },
+    "master": {
+      "path": "主控端.exe",
+      "sha256": "2161d08977d133ef463a021073d5a4d98574b8057d297edad197875c3f1298a5",
+      "size": 55216978
+    },
+    "verification": {
+      "path": "验证端.exe",
+      "sha256": "a2fa7c80fc8ffb46285b42ede37d179a714ea888cba3334ca697d2b01ae474cb",
+      "size": 55190179
+    }
+  },
+  "folder": {
+    "guarded_extensions": [
+      ".exe",
+      ".dll"
+    ],
+    "exempt_files": [
+      "release_manifest.json",
+      "release_manifest.sig"
+    ],
+    "required_apps": [
+      "server",
+      "admin",
+      "master",
+      "verification"
+    ]
+  }
+}

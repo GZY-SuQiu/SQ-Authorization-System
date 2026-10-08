@@ -1,0 +1,9 @@
+# Runtime dependencies, pinned to the versions verified locally on 2026-10-08.
+# Do not add dev/test tooling here; see requirements-dev.txt.
+cryptography==50.0.0
+PySide6==6.11.1
+fastapi==0.141.1
+uvicorn==0.52.3
+requests==2.34.2
+pydantic==2.13.4
+PyInstaller==6.22.0
