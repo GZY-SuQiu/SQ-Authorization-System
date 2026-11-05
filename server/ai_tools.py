@@ -455,6 +455,12 @@ class ToolRegistry:
                     "activation_limit": _integer("次数卡的可激活台数（card_type=activation 时必填）", 1, 100000),
                     "max_devices": _integer("每张时长卡可绑定设备数，默认 1", 1, 10000),
                     "edition": _string("版本标识，默认 standard"),
+                    "features": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 32},
+                        "maxItems": 32,
+                        "description": "功能位列表（小写字母/数字/._:-；可传逗号分隔字符串）",
+                    },
                     "note": _string("备注", maxLength=500),
                     "prefix": _string("卡密前缀，默认使用系统配置"),
                 },
@@ -630,6 +636,10 @@ class ToolRegistry:
         prefix = _as_text(args.get("prefix"), "prefix", max_length=16) or self.prefix
         if not all(ch.isalnum() or ch in "-_" for ch in prefix):
             raise ToolError("卡密前缀只能包含字母、数字、- 或 _")
+        try:
+            feature_list = security.normalize_features(args.get("features"))
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
         if card_type == "activation":
             limit = _as_int(args.get("activation_limit", 0), "activation_limit", 1, 100000)
             batch_no, keys = self.db.generate_licenses(
@@ -640,6 +650,7 @@ class ToolRegistry:
                 prefix=prefix.upper(),
                 card_type="activation",
                 activation_limit=limit,
+                features=feature_list,
             )
             self._log("AI生成密钥", operator, batch_no, f"次数卡 {count} 张 · {limit} 次", ip)
             return {
@@ -668,6 +679,7 @@ class ToolRegistry:
             created_by=operator.get("username", ""),
             prefix=prefix.upper(),
             duration_unit=unit,
+            features=feature_list,
         )
         self._log(
             "AI生成密钥",

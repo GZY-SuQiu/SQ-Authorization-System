@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS licenses (
     created_by    TEXT,
     created_at    TEXT NOT NULL,
     activated_at  TEXT,
-    expires_at    TEXT
+    expires_at    TEXT,
+    features      TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS activations (
@@ -335,6 +336,7 @@ MIGRATIONS = {
         "activation_limit": "INTEGER NOT NULL DEFAULT 0",
         "activation_count": "INTEGER NOT NULL DEFAULT 0",
         "auto_revoked": "INTEGER NOT NULL DEFAULT 0",
+        "features": "TEXT NOT NULL DEFAULT ''",
     },
     "activations": {
         "session_secret": "TEXT",
@@ -675,6 +677,7 @@ class Database:
         duration_unit: str = "day",
         card_type: str = CARD_TYPE_DURATION,
         activation_limit: int = 0,
+        features: list[str] | None = None,
     ) -> tuple[str, list[str]]:
         # UUID-backed batch IDs are collision-resistant. The old second-level
         # timestamp plus three random digits was reproducible under load.
@@ -686,6 +689,9 @@ class Database:
             else CARD_TYPE_DURATION
         )
         limit = int(activation_limit or 0)
+        # 功能位（Feature Flags）：规范化为列表并序列化存储；空列表存空串。
+        feature_list = security.normalize_features(features)
+        feature_text = security.features_to_text(feature_list)
         if kind == CARD_TYPE_ACTIVATION:
             if limit <= 0:
                 raise ValueError("激活次数卡必须设置大于 0 的激活次数")
@@ -707,8 +713,8 @@ class Database:
                     self._conn.execute(
                         "INSERT INTO licenses (key_code, edition, card_type, duration_days,"
                         " duration_unit, activation_limit, max_devices, status, batch_no,"
-                        " note, created_by, created_at)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, 'unused', ?, ?, ?, ?)",
+                        " note, created_by, created_at, features)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, 'unused', ?, ?, ?, ?, ?)",
                         (
                             code,
                             edition,
@@ -721,6 +727,7 @@ class Database:
                             note,
                             created_by,
                             created_at,
+                            feature_text,
                         ),
                     )
                     keys.append(code)

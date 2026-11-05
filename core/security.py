@@ -283,6 +283,65 @@ def is_long_freeze(frozen_until: str | None, threshold_days: int = 365) -> bool:
     return total is not None and total > int(threshold_days) * 86400
 
 
+# --------------------------------------------------------------------------- #
+# 功能位（Feature Flags）
+# --------------------------------------------------------------------------- #
+FEATURE_MAX_COUNT = 32
+FEATURE_MAX_LENGTH = 32
+_FEATURE_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789_.:-")
+
+
+def normalize_features(value) -> list[str]:
+    """规范化功能位列表：接受 list 或逗号/顿号分隔的字符串。
+
+    规则：小写、去重、保序；每项 ≤32 字符、仅限 [a-z0-9_.:-]；最多 32 项。
+    非法项抛 ValueError（调用方负责转成 400/工具错误），空值为空列表。
+    """
+    if value is None:
+        items: list = []
+    elif isinstance(value, str):
+        normalized = value.replace("，", ",").replace("、", ",")
+        items = [part.strip() for part in normalized.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        raise ValueError("功能位格式无效（应为数组或逗号分隔字符串）")
+    out: list[str] = []
+    for raw in items:
+        text = str(raw or "").strip().lower()
+        if not text:
+            continue
+        if len(text) > FEATURE_MAX_LENGTH:
+            raise ValueError(f"功能位过长（最多 {FEATURE_MAX_LENGTH} 字符）")
+        if any(ch not in _FEATURE_ALLOWED for ch in text):
+            raise ValueError(f"功能位只允许小写字母/数字/._:-：{text[:16]}")
+        if text not in out:
+            out.append(text)
+    if len(out) > FEATURE_MAX_COUNT:
+        raise ValueError(f"功能位数量超限（最多 {FEATURE_MAX_COUNT} 项）")
+    return out
+
+
+def features_to_text(features) -> str:
+    """序列化为库内存储形态（JSON 数组；空列表存空串，保持旧行兼容）。"""
+    items = [str(item) for item in (features or []) if str(item or "").strip()]
+    return json.dumps(items, ensure_ascii=False, separators=(",", ":")) if items else ""
+
+
+def features_from_text(text) -> list[str]:
+    """从库内存储形态解析；容忍坏数据（返回空列表）。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if isinstance(item, str) and item]
+
+
 def _b64e(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 

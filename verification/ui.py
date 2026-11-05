@@ -1911,10 +1911,12 @@ class VerifyWindow(QMainWindow):
         exp = payload.get("exp")
         remain = security.humanize_remaining(exp) if exp else "永久"
         self.input_key.setText(payload.get("key", ""))
+        feats = payload.get("feats") or []
+        feats_line = f"\n已授权功能：{', '.join(feats)}" if feats else ""
         self._set_result(
             "success", "离线激活成功",
             f"密钥：{payload.get('key', '')}\n"
-            f"到期时间：{exp or '永久'}    剩余：{remain}\n"
+            f"到期时间：{exp or '永久'}    剩余：{remain}{feats_line}\n"
             f"已保存到本机，可在无网络环境离线运行。",
         )
         self._set_online("info", "离线模式：本地授权校验")

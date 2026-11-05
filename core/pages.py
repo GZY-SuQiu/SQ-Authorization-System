@@ -1,4 +1,5 @@
 import csv
+import json
 import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -439,6 +440,8 @@ class GeneratePage(BasePage):
         self.devices.setRange(0, 999)
         self.devices.setSpecialValueText("不限")
         self.prefix = QLineEdit("GSQ")
+        self.features = QLineEdit()
+        self.features.setPlaceholderText("选填，逗号分隔，如：pro,cloud,export")
         self.note = QLineEdit()
         self.note.setPlaceholderText("选填，如：某客户/某活动")
         form.addRow("生成数量", self.count)
@@ -449,6 +452,7 @@ class GeneratePage(BasePage):
         form.addRow("可激活次数", self.activation_limit)
         form.addRow("可绑定设备", self.devices)
         form.addRow("密钥前缀", self.prefix)
+        form.addRow("功能位", self.features)
         form.addRow("备注", self.note)
         self._on_mode_changed()
         form_card.body.addLayout(form)
@@ -524,12 +528,14 @@ class GeneratePage(BasePage):
         self.activation_limit.setValue(10)
         self.devices.setValue(0)
         self.prefix.setText("GSQ")
+        self.features.clear()
         self.note.clear()
         self.notify("生成参数已重置", "success")
 
     def generate(self) -> None:
         activation = self.card_mode.currentData() == "activation"
         try:
+            feature_text = self.features.text().strip()
             data = self.client.generate_licenses(
                 count=self.count.value(),
                 edition=self.edition.currentData(),
@@ -538,6 +544,11 @@ class GeneratePage(BasePage):
                 duration_days=0 if activation else self.duration.value(),
                 duration_unit="day" if activation else self.unit.currentData(),
                 max_devices=0 if activation else self.devices.value(),
+                features=[
+                    part.strip()
+                    for part in feature_text.replace("，", ",").split(",")
+                    if part.strip()
+                ],
                 note=self.note.text().strip(),
                 prefix=self.prefix.text().strip() or "GSQ",
             )
@@ -675,9 +686,18 @@ class DetailDialog(QDialog):
                 f"有效期：{duration_text(lic['duration_days'], lic.get('duration_unit'))}"
             )
         state = card_status_text(lic) or status_text(lic["status"])
+        feature_values = lic.get("features")
+        if not isinstance(feature_values, list):
+            try:
+                feature_values = json.loads(feature_values) if feature_values else []
+            except (TypeError, ValueError):
+                feature_values = []
+        features_line = (
+            f"\n功能位：{', '.join(feature_values)}" if feature_values else ""
+        )
         info = (
             f"版本：{edition_text(lic['edition'])}    状态：{state}    {usage}\n"
-            f"{validity}    可绑定设备：{devices_text(lic['max_devices'])}\n"
+            f"{validity}    可绑定设备：{devices_text(lic['max_devices'])}{features_line}\n"
             f"创建时间：{lic['created_at']}    到期时间：{lic['expires_at'] or '—'}    "
             f"批次：{lic['batch_no'] or '—'}    备注：{lic['note'] or '—'}"
         )

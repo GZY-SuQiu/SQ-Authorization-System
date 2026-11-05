@@ -380,6 +380,7 @@ def do_activate(
         "server_ts": security.now_ts(),
     }
     payload.update(_activation_fields(fresh))
+    payload["features"] = security.features_from_text(fresh.get("features"))
     if payload.get("activation_left") == 0:
         payload["message"] += "，该密钥激活次数已用尽"
     return payload
@@ -444,6 +445,7 @@ def do_verify(
         "remaining": security.humanize_remaining(expiry),
     }
     payload.update(_activation_fields(lic))
+    payload["features"] = security.features_from_text(lic.get("features"))
     return payload
 
 
@@ -460,6 +462,7 @@ class GenerateBody(SafeModel):
     duration_unit: str = Field(default="day", max_length=16)
     activation_limit: int = Field(default=0, ge=0, le=100000)
     max_devices: int = Field(default=1, ge=0, le=10000)
+    features: list[str] = Field(default_factory=list, max_length=32)
     note: str = Field(default="", max_length=500)
     prefix: str = Field(default="", max_length=16)
 
@@ -1930,6 +1933,10 @@ def create_app(
             unit = checked_unit(body.duration_days, body.duration_unit)
             duration_days = body.duration_days
             max_devices = body.max_devices
+        try:
+            feature_list = security.normalize_features(body.features)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         batch_no, keys = db.generate_licenses(
             count=body.count,
             edition=body.edition or "standard",
@@ -1941,6 +1948,7 @@ def create_app(
             duration_unit=unit,
             card_type=card_type,
             activation_limit=body.activation_limit,
+            features=feature_list,
         )
         detail = f"共 {len(keys)} 个"
         if card_type == "activation":
@@ -1981,6 +1989,8 @@ def create_app(
         lic = db.get_license(key_code)
         if not lic:
             raise HTTPException(status_code=404, detail="密钥不存在")
+        # 功能位在库内为 JSON 文本；序列化前转为列表，客户端可直接使用。
+        lic["features"] = security.features_from_text(lic.get("features"))
         return {"license": lic, "activations": db.list_activations(key_code)}
 
     @app.post("/api/license/offline_code")
@@ -2052,6 +2062,7 @@ def create_app(
             expires_at=effective_expiry,
             max_devices=lic["max_devices"],
             note=lic["note"] or "",
+            features=security.features_from_text(lic.get("features")),
         )
         code = offline.make_activation_code(payload, offline_private)
         db.add_log("生成离线激活码", admin["username"], key_code, f"设备 {machine_code}", "")
@@ -3031,6 +3042,8 @@ def create_app(
             "heartbeat_count": int(act.get("heartbeat_count") or 0) + 1,
         }
         payload.update(_activation_fields(lic))
+        if lic is not None:
+            payload["features"] = security.features_from_text(lic.get("features"))
         return payload
 
 

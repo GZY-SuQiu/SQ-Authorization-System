@@ -153,6 +153,8 @@ class LicenseClient:
         # 最近一次成功激活的绑定信息，verify/heartbeat 缺省复用。
         self.last_key_code: str = ""
         self.last_machine_code: str = ""
+        # 最近一次激活/校验响应下发的功能位（Feature Flags）。
+        self._features: list[str] = []
 
     # ------------------------------------------------------------------ #
     # 契约第 4 节方法
@@ -189,12 +191,14 @@ class LicenseClient:
             self.session_secret = str(secret)
             self.last_key_code = key
             self.last_machine_code = target_machine
+        if isinstance(data, dict) and data.get("ok"):
+            self._remember_features(data)
         return data
 
     def verify(self, key_code=None, machine_code=None) -> dict:
         """校验本机授权；缺省复用最近一次激活的密钥与机器码。"""
         self._require_session()
-        return self._request(
+        data = self._request(
             "POST",
             "/api/client/verify",
             json_body={
@@ -203,6 +207,9 @@ class LicenseClient:
             },
             sign_with_session=True,
         )
+        if isinstance(data, dict) and data.get("ok"):
+            self._remember_features(data)
+        return data
 
     def heartbeat(self, key_code=None, machine_code=None) -> dict:
         """发送心跳；缺省复用最近一次激活的密钥与机器码。"""
@@ -216,6 +223,23 @@ class LicenseClient:
             },
             sign_with_session=True,
         )
+
+    # ------------------------------------------------------------------ #
+    # Feature flags（功能位授权）
+    # ------------------------------------------------------------------ #
+    def _remember_features(self, data: dict) -> None:
+        features = data.get("features") if isinstance(data, dict) else None
+        if isinstance(features, list):
+            self._features = [str(item) for item in features if isinstance(item, str)]
+
+    def features(self) -> list[str]:
+        """最近一次激活/校验响应下发的功能位列表（无则空列表）。"""
+        return list(self._features)
+
+    def has_feature(self, name: str) -> bool:
+        """便捷判断：指定功能位是否被授权（大小写不敏感）。"""
+        needle = str(name or "").strip().lower()
+        return bool(needle) and needle in {item.lower() for item in self._features}
 
     def is_valid(self, key_code=None, machine_code=None) -> bool:
         """便捷封装：任何失败（网络/签名/授权）一律返回 False。"""

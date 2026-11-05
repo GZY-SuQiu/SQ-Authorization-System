@@ -220,6 +220,12 @@ def parse_activation_code(code: str, public_hex: str) -> dict | None:
     payload["dur"] = duration
     payload["dev"] = devices
     payload["note"] = _text(payload.get("note"), 500)
+    raw_features = payload.get("feats")
+    payload["feats"] = (
+        [str(item) for item in raw_features if isinstance(item, str) and str(item).strip()]
+        if isinstance(raw_features, list)
+        else []
+    )
     return payload
 
 
@@ -231,8 +237,9 @@ def build_activation_payload(
     expires_at: str | None,
     max_devices: int = 1,
     note: str = "",
+    features: list[str] | None = None,
 ) -> dict:
-    return {
+    payload = {
         "mc": (machine_code or "").strip().upper(),
         "key": (key_code or "").strip().upper(),
         "ed": edition or "standard",
@@ -241,3 +248,9 @@ def build_activation_payload(
         "dev": int(max_devices or 0),
         "note": note or "",
     }
+    feature_items = [str(item) for item in (features or []) if str(item or "").strip()]
+    if feature_items:
+        # 功能位只在非空时写入：旧客户端对未知字段安全忽略；
+        # 旧激活码（无该字段）解析结果 feats 为空列表，行为不变。
+        payload["feats"] = feature_items
+    return payload
