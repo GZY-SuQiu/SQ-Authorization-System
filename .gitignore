@@ -34,3 +34,6 @@ data/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Nuitka 加固构建产物（本地中间物，不入库）
+build_nuitka/
