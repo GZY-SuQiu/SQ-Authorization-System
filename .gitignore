@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 构建产物
+build/
+*.spec
+build_log.txt
+
+# 发布签名：私钥目录与构建时生成的固定公钥（绝不入库）
+release_keys/
+core/release_pubkey.py
+core/release_identity.py
+backup_secrets_*/
+_cleanup_quarantine_*/
+
+# 配置与数据（含密钥 / 授权数据库，不纳入版本库）
+config.json
+server_config.json
+admin_config.json
+master_config.json
+verification_config.json
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
