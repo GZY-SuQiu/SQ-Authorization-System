@@ -173,6 +173,9 @@ SERVER_DEFAULT_CONFIG = {
         # P1 风控：同一 Key 在窗口内出现的不同 IP 网段数超过阈值时告警。
         "ip_jump_window_minutes": 10,
         "ip_jump_alert_threshold": 2,
+        # 换机分级：设备满员后，来自该密钥已用网络段的新硬件码只告警
+        # （大概率为合法换机）；跨网段才冻结。设为 false 恢复"总是冻结"。
+        "machine_mismatch_same_subnet_grace": True,
         # P2-13 数据保留：按天清理历史数据，0 表示该类数据永久保留。
         "retention_audit_days": 180,
         "retention_events_days": 365,

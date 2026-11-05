@@ -1,4 +1,4 @@
-"""P1 风控接线测试：新硬件码冻结 + IP 跳动告警。"""
+"""P1 风控接线测试：换机分级（同网段告警/跨网段冻结）+ IP 跳动告警。"""
 
 import tempfile
 import threading
@@ -125,6 +125,22 @@ class RiskUnitTests(unittest.TestCase):
         self.assertGreaterEqual(total, 1)
         self.assertEqual(items[0]["kind"], "machine_mismatch")
 
+    def test_same_subnet_mismatch_grace(self):
+        """换机分级：同网段新硬件码仅告警，跨网段才冻结。"""
+        self.db.add_activation_ip_event(
+            self.license["id"], self.key, "M-OLD", "10.0.0.1", "10.0.0.0/24"
+        )
+        same = risk.handle_machine_mismatch(self.db, self.key, "M-NEW", "10.0.0.2")
+        self.assertIsNotNone(same)
+        self.assertFalse(same["frozen"])
+        # 未激活的卡保持 unused；关键是未被冻结（合法换机不被误伤）。
+        self.assertNotEqual(self.db.get_license(self.key)["status"], "frozen")
+
+        across = risk.handle_machine_mismatch(self.db, self.key, "M-NEW", "198.51.100.9")
+        self.assertIsNotNone(across)
+        self.assertTrue(across["frozen"])
+        self.assertEqual(self.db.get_license(self.key)["status"], "frozen")
+
     def test_find_activation_by_machine(self):
         self.assertIsNone(self.db.find_activation_by_machine("NO-SUCH-MACHINE"))
 
@@ -154,7 +170,8 @@ class MachineMismatchApiTests(unittest.TestCase):
         self.db.close()
         self.tmp.cleanup()
 
-    def test_new_machine_freezes_license_and_emails_admins(self):
+    def test_same_subnet_mismatch_warns_without_freezing(self):
+        """同网段新硬件码：仅告警不冻结（合法换机保护）。"""
         login = self.client.login("admin", self.bootstrap)
         if login.get("must_change_password"):
             self.client.change_password(self.bootstrap, "RiskAdmin#2026")
@@ -165,6 +182,39 @@ class MachineMismatchApiTests(unittest.TestCase):
 
         first = self.client.activate(key, "MACHINE-A", "dev-a")
         self.assertTrue(first.get("ok"), first)
+        # 新机器从同一网段（127.0.0.0/24）抢占 -> 仅告警
+        second = self.client.activate(key, "MACHINE-B", "dev-b")
+        self.assertEqual(second.get("code"), "limit", second)
+
+        license = self.db.get_license(key)
+        self.assertEqual(license["status"], "active")
+        events, total = self.db.list_risk_events()
+        self.assertGreaterEqual(total, 1)
+        self.assertEqual(events[0]["kind"], "machine_mismatch_warn")
+        risk_mails = [item for item in self.mailer.items if item["template_code"] == "risk_alert"]
+        self.assertTrue(risk_mails, self.mailer.items)
+
+    def test_other_subnet_mismatch_freezes_and_emails_admins(self):
+        """跨网段新硬件码：冻结并邮件告警（克隆嫌疑）。"""
+        login = self.client.login("admin", self.bootstrap)
+        if login.get("must_change_password"):
+            self.client.change_password(self.bootstrap, "RiskAdmin#2026")
+        generated = self.client.generate_licenses(
+            count=1, duration_days=30, max_devices=1
+        )
+        key = generated["keys"][0]
+
+        first = self.client.activate(key, "MACHINE-A", "dev-a")
+        self.assertTrue(first.get("ok"), first)
+        # 把历史 IP 记录替换为另一网段（模拟旧设备在用 203.0.113.0/24），
+        # 新机器从 127.0.0.1 抢占 -> 跨网段 -> 冻结。
+        license = self.db.get_license(key)
+        self.db._execute(
+            "DELETE FROM activation_ip_events WHERE key_code = ?", (key,)
+        )
+        self.db.add_activation_ip_event(
+            license["id"], key, "MACHINE-A", "203.0.113.7", "203.0.113.0/24"
+        )
         second = self.client.activate(key, "MACHINE-B", "dev-b")
         self.assertEqual(second.get("code"), "limit", second)
 

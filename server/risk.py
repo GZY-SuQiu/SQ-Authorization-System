@@ -88,23 +88,66 @@ def record_ip_event(
     }
 
 
-def freeze_for_machine_mismatch(
+def handle_machine_mismatch(
     db,
     key_code: str,
     machine_code: str,
     ip: str,
     *,
-    reason: str = "machine_mismatch：检测到未授权的新硬件码，已冻结该密钥",
+    same_subnet_grace: bool = True,
+    reason_frozen: str = "machine_mismatch：检测到未授权的新硬件码，已冻结该密钥",
+    reason_warn: str = "machine_mismatch：检测到同网段新硬件码，已记录（未冻结）",
 ) -> dict | None:
-    """Freeze a licence after a new-device activation attempt and log the risk."""
+    """设备满员后出现新硬件码时的分级处置。
+
+    合法换机（重装系统、换电脑）常发生在同一网络段内；克隆则多出现在
+    异地网络。因此：新硬件码来自该密钥用过的网络段 -> 仅记录告警；
+    来自其他网络段 -> 冻结该密钥（可逆，主控可解冻/换绑）。
+
+    返回 ``{"license", "frozen", "same_subnet", "reason"}``；密钥不存在返回 None。
+    """
     try:
         license = db.get_license(str(key_code or ""))
     except Exception:
         return None
     if not license:
         return None
+
+    same_subnet = False
+    new_subnet = client_subnet(ip)
+    if same_subnet_grace and new_subnet:
+        try:
+            events = db.recent_activation_ip_events(str(key_code), 50)
+        except Exception:
+            events = []
+        old_subnets = set()
+        for event in events:
+            subnet = str(event.get("subnet") or "") or client_subnet(event.get("ip"))
+            if subnet:
+                old_subnets.add(subnet)
+        same_subnet = new_subnet in old_subnets
+
+    if same_subnet:
+        try:
+            db.add_risk_event(
+                "machine_mismatch_warn",
+                "warning",
+                str(key_code or ""),
+                str(machine_code or ""),
+                str(ip or ""),
+                reason_warn,
+            )
+        except Exception:
+            pass
+        return {
+            "license": license,
+            "frozen": False,
+            "same_subnet": True,
+            "reason": reason_warn,
+        }
+
     try:
-        db.freeze_license(str(key_code or ""), PERMANENT_FREEZE_UNTIL, reason)
+        db.freeze_license(str(key_code or ""), PERMANENT_FREEZE_UNTIL, reason_frozen)
     except Exception:
         return None
     try:
@@ -114,8 +157,38 @@ def freeze_for_machine_mismatch(
             str(key_code or ""),
             str(machine_code or ""),
             str(ip or ""),
-            reason,
+            reason_frozen,
         )
     except Exception:
         pass
-    return license
+    return {
+        "license": license,
+        "frozen": True,
+        "same_subnet": False,
+        "reason": reason_frozen,
+    }
+
+
+def freeze_for_machine_mismatch(
+    db,
+    key_code: str,
+    machine_code: str,
+    ip: str,
+    *,
+    reason: str = "machine_mismatch：检测到未授权的新硬件码，已冻结该密钥",
+) -> dict | None:
+    """兼容入口：严格模式（无视网段，总是冻结）。
+
+    保留给不支持分级的旧调用方；新代码请用 ``handle_machine_mismatch``。
+    """
+    outcome = handle_machine_mismatch(
+        db,
+        key_code,
+        machine_code,
+        ip,
+        same_subnet_grace=False,
+        reason_frozen=reason,
+    )
+    if not outcome:
+        return None
+    return outcome.get("license")

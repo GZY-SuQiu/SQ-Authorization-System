@@ -272,6 +272,17 @@ def humanize_remaining(expires_at: str | None) -> str:
     return format_seconds(seconds_left(expires_at))
 
 
+def is_long_freeze(frozen_until: str | None, threshold_days: int = 365) -> bool:
+    """True when a freeze spans so long it should render as an outright lock.
+
+    换机风控会把克隆嫌疑冻结到远期时间（2099），直接显示"剩余 N 万天"
+    没有任何操作意义，也没有流通价值；超过阈值的冻结统一按"长期锁定"
+    呈现，由管理员解冻/换绑处理。正常临时冻结（分钟/小时/天）不受影响。
+    """
+    total = seconds_left(frozen_until) if frozen_until else None
+    return total is not None and total > int(threshold_days) * 86400
+
+
 def _b64e(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 

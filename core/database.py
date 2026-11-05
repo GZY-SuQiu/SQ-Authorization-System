@@ -3459,3 +3459,15 @@ class Database:
             (security.normalize_key(key_code), str(since or "")),
         )
         return int(row["n"]) if row else 0
+
+    def recent_activation_ip_events(self, key_code, limit: int = 50) -> list[dict]:
+        """Most recent IP observations for a key, newest first.
+
+        换机分级风控用它判断"新硬件码是否来自旧设备用过的网络段"。
+        """
+        rows = self._fetchall(
+            "SELECT machine_code, ip, subnet, created_at FROM activation_ip_events"
+            " WHERE key_code = ? ORDER BY id DESC LIMIT ?",
+            (security.normalize_key(key_code), max(1, min(int(limit or 50), 500))),
+        )
+        return [dict(row) for row in rows]

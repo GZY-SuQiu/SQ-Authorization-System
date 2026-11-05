@@ -248,9 +248,14 @@ def _client_ip(request: Request) -> str:
 def _frozen_block(lic: dict | None) -> dict | None:
     if not lic or lic["status"] != "frozen":
         return None
-    remaining = security.humanize_remaining(lic.get("frozen_until"))
+    if security.is_long_freeze(lic.get("frozen_until")):
+        # 换机风控的远期冻结显示"剩余 N 万天"没有任何操作意义，
+        # 统一按长期锁定呈现，由管理员解冻/换绑处理。
+        tip = "该密钥已被长期锁定（需管理员解冻/换绑）"
+    else:
+        remaining = security.humanize_remaining(lic.get("frozen_until"))
+        tip = f"该密钥已被冻结，剩余 {remaining}"
     reason = lic.get("freeze_reason") or ""
-    tip = f"该密钥已被冻结，剩余 {remaining}"
     if reason:
         tip += f"（原因：{reason}）"
     return {"ok": False, "code": "frozen", "message": tip}
@@ -2000,11 +2005,15 @@ def create_app(
                 detail="激活次数卡不支持离线激活码，请在联网状态下激活",
             )
         if lic["status"] == "frozen":
-            remaining = security.humanize_remaining(lic.get("frozen_until"))
+            _frozen_tip = (
+                "长期锁定（需管理员解冻/换绑）"
+                if security.is_long_freeze(lic.get("frozen_until"))
+                else f"剩余 {security.humanize_remaining(lic.get('frozen_until'))}"
+            )
             db.add_log("生成离线激活码失败", admin["username"], key_code, "密钥已冻结", "")
             raise HTTPException(
                 status_code=400,
-                detail=f"该密钥已被冻结（剩余 {remaining}），无法生成离线激活码",
+                detail=f"该密钥已被冻结（{_frozen_tip}），无法生成离线激活码",
             )
         if lic["status"] == "revoked":
             db.add_log("生成离线激活码失败", admin["username"], key_code, "密钥已吊销", "")
@@ -2838,20 +2847,30 @@ def create_app(
             session_secret,
         )
         if result.get("code") == "limit":
-            # A new machine on a full licence is treated as a clone attempt:
-            # freeze the key and alert the bound user plus administrators.
+            # A new machine on a full licence: a change seen from a network the
+            # key has used before is a likely legitimate device move and only
+            # alerted; a change from another network freezes the key (clone
+            # suspicion) and notifies the owner plus administrators.
             try:
-                license = risk.freeze_for_machine_mismatch(
-                    db, body.key_code, body.machine_code, ip
+                outcome = risk.handle_machine_mismatch(
+                    db,
+                    body.key_code,
+                    body.machine_code,
+                    ip,
+                    same_subnet_grace=bool(
+                        config.security.get("machine_mismatch_same_subnet_grace", True)
+                    ),
                 )
-                if license:
+                if outcome and outcome.get("license"):
                     alerting.notify_machine_mismatch(
                         db,
                         mailer,
-                        license=license,
+                        license=outcome["license"],
                         machine_code=body.machine_code,
                         ip=ip,
+                        reason=outcome.get("reason") or "",
                         smtp_config=smtp_config,
+                        event_kind="frozen" if outcome.get("frozen") else "subnet_warn",
                     )
             except Exception:
                 pass
@@ -2966,9 +2985,12 @@ def create_app(
                 "server_ts": server_ts,
             }
         if lic and lic["status"] == "frozen":
-            remaining = security.humanize_remaining(lic.get("frozen_until"))
+            if security.is_long_freeze(lic.get("frozen_until")):
+                message = "授权已被长期锁定（需管理员解冻/换绑）"
+            else:
+                remaining = security.humanize_remaining(lic.get("frozen_until"))
+                message = f"授权已被冻结，剩余 {remaining}"
             reason = lic.get("freeze_reason") or ""
-            message = f"授权已被冻结，剩余 {remaining}"
             if reason:
                 message += f"（原因：{reason}）"
             return {

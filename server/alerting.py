@@ -196,6 +196,7 @@ def notify_machine_mismatch(
     ip: str,
     reason: str = "检测到未授权的新硬件码，已冻结该密钥",
     smtp_config=None,
+    event_kind: str = "mismatch",
 ) -> list[int]:
     variables = {
         "key_code": mask_key(license.get("key_code")),
@@ -211,7 +212,7 @@ def notify_machine_mismatch(
         variables,
         license_id=license.get("id"),
         smtp_config=smtp_config,
-        dedupe_key=f"machine_mismatch:{license.get('id')}:{_bucket()}",
+        dedupe_key=f"machine_mismatch:{event_kind}:{license.get('id')}:{_bucket()}",
     )
 
 
