@@ -176,6 +176,9 @@ SERVER_DEFAULT_CONFIG = {
         # 换机分级：设备满员后，来自该密钥已用网络段的新硬件码只告警
         # （大概率为合法换机）；跨网段才冻结。设为 false 恢复"总是冻结"。
         "machine_mismatch_same_subnet_grace": True,
+        # 浮动席位（max_concurrent>0）的在线租约窗口：心跳/校验在该窗口内
+        # 视为占座；停跳超过窗口自动释放席位。
+        "seat_lease_seconds": 90,
         # P2-13 数据保留：按天清理历史数据，0 表示该类数据永久保留。
         "retention_audit_days": 180,
         "retention_events_days": 365,

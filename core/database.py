@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS licenses (
     created_at    TEXT NOT NULL,
     activated_at  TEXT,
     expires_at    TEXT,
-    features      TEXT NOT NULL DEFAULT ''
+    features      TEXT NOT NULL DEFAULT '',
+    expiry_mode   TEXT NOT NULL DEFAULT 'relative',
+    max_concurrent INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS activations (
@@ -83,6 +85,17 @@ CREATE TABLE IF NOT EXISTS nonces (
     key_code   TEXT,
     created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS trial_claims (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    machine_code TEXT NOT NULL,
+    batch_no     TEXT NOT NULL,
+    key_code     TEXT,
+    claimed_at   TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trial_claims_unique
+    ON trial_claims(machine_code, batch_no);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -337,6 +350,8 @@ MIGRATIONS = {
         "activation_count": "INTEGER NOT NULL DEFAULT 0",
         "auto_revoked": "INTEGER NOT NULL DEFAULT 0",
         "features": "TEXT NOT NULL DEFAULT ''",
+        "expiry_mode": "TEXT NOT NULL DEFAULT 'relative'",
+        "max_concurrent": "INTEGER NOT NULL DEFAULT 0",
     },
     "activations": {
         "session_secret": "TEXT",
@@ -364,6 +379,7 @@ RESTORE_REQUIRED_COLUMNS = {
 
 CARD_TYPE_DURATION = "duration"
 CARD_TYPE_ACTIVATION = "activation"
+CARD_TYPE_TRIAL = "trial"
 
 ACTION_CODE_MAX_ATTEMPTS = 5
 
@@ -461,6 +477,8 @@ class Database:
         self._stats_cache_value: dict | None = None
         # P2-14：服务端界面按筛选条件复用日志计数，避免每 10 秒全表 COUNT。
         self._log_count_cache: dict[tuple, tuple[float, int]] = {}
+        # 浮动席位租约窗口（秒）；调用方可覆盖（create_app 读取 security 配置）。
+        self.seat_lease_seconds = 90
         # Legacy databases predate columns that SCHEMA indexes reference (for
         # example admins.email), so upgrade existing tables first. The second
         # pass then catches tables that this SCHEMA run just created.
@@ -678,20 +696,31 @@ class Database:
         card_type: str = CARD_TYPE_DURATION,
         activation_limit: int = 0,
         features: list[str] | None = None,
+        max_concurrent: int = 0,
+        expiry_mode: str = "relative",
+        fixed_expires_at: str | None = None,
     ) -> tuple[str, list[str]]:
         # UUID-backed batch IDs are collision-resistant. The old second-level
         # timestamp plus three random digits was reproducible under load.
         batch_no = f"B{uuid.uuid4().hex}"
         created_at = security.now_str()
-        kind = (
-            CARD_TYPE_ACTIVATION
-            if str(card_type or "").strip().lower() == CARD_TYPE_ACTIVATION
-            else CARD_TYPE_DURATION
-        )
+        raw_kind = str(card_type or "").strip().lower()
+        if raw_kind == CARD_TYPE_TRIAL:
+            kind = CARD_TYPE_TRIAL
+        elif raw_kind == CARD_TYPE_ACTIVATION:
+            kind = CARD_TYPE_ACTIVATION
+        else:
+            kind = CARD_TYPE_DURATION
         limit = int(activation_limit or 0)
         # 功能位（Feature Flags）：规范化为列表并序列化存储；空列表存空串。
         feature_list = security.normalize_features(features)
         feature_text = security.features_to_text(feature_list)
+        # 浮动席位（max_concurrent>0）：时长卡/试用卡按“同时在线数”计，忽略绑定
+        # 设备上限；次数卡是激活次数模型，不支持浮动席位（强制归零）。
+        seats = max(0, int(max_concurrent or 0))
+        mode = "fixed" if str(expiry_mode or "").strip().lower() == "fixed" else "relative"
+        if kind == CARD_TYPE_ACTIVATION:
+            seats = 0
         if kind == CARD_TYPE_ACTIVATION:
             if limit <= 0:
                 raise ValueError("激活次数卡必须设置大于 0 的激活次数")
@@ -699,9 +728,19 @@ class Database:
             unit = "day"
             duration_days = 0
             max_devices = 0
+        elif kind == CARD_TYPE_TRIAL:
+            limit = 0
+            unit = security.normalize_unit(duration_unit)
+            if int(duration_days or 0) <= 0 and mode != "fixed":
+                raise ValueError("试用卡必须设置大于 0 的有效期或固定到期时间")
         else:
             limit = 0
             unit = security.normalize_unit(duration_unit)
+        fixed_at = None
+        if mode == "fixed":
+            fixed_at = str(fixed_expires_at or "").strip()
+            if security.parse_expiry(fixed_at) is None:
+                raise ValueError("固定到期时间格式无效")
         keys: list[str] = []
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -713,8 +752,9 @@ class Database:
                     self._conn.execute(
                         "INSERT INTO licenses (key_code, edition, card_type, duration_days,"
                         " duration_unit, activation_limit, max_devices, status, batch_no,"
-                        " note, created_by, created_at, features)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, 'unused', ?, ?, ?, ?, ?)",
+                        " note, created_by, created_at, features, max_concurrent,"
+                        " expiry_mode, expires_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, 'unused', ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             code,
                             edition,
@@ -728,6 +768,9 @@ class Database:
                             created_by,
                             created_at,
                             feature_text,
+                            seats,
+                            mode,
+                            fixed_at,
                         ),
                     )
                     keys.append(code)
@@ -1617,6 +1660,18 @@ class Database:
                 # database value is the single source of truth.
                 effective_expiry = lic["expires_at"] or expires_at
 
+                # 试用卡防重领：同机同批次仅允许领一张（重激活自己的记录不受限）。
+                is_trial = str(lic["card_type"] or "") == CARD_TYPE_TRIAL
+                if is_trial and existing is None:
+                    claim = self._conn.execute(
+                        "SELECT key_code FROM trial_claims"
+                        " WHERE machine_code = ? AND batch_no = ?",
+                        (machine, lic["batch_no"] or ""),
+                    ).fetchone()
+                    if claim and str(claim["key_code"] or "") != code:
+                        self._conn.commit()
+                        return "trial_used", None, None
+
                 count_card = is_activation_card(lic)
                 limit = int(lic["activation_limit"] or 0)
                 used = int(lic["activation_count"] or 0)
@@ -1632,19 +1687,38 @@ class Database:
                         " expires_at = COALESCE(?, expires_at) WHERE id = ?",
                         (device_name, now, session_secret, effective_expiry, existing["id"]),
                     )
+                    if is_trial:
+                        self._record_trial_claim(machine, lic, code, now)
                     self._conn.commit()
                     return "already", existing["id"], effective_expiry
 
-                max_devices = int(lic["max_devices"] or 0)
-                if max_devices:
+                max_concurrent = int(lic["max_concurrent"] or 0)
+                if max_concurrent > 0:
+                    # 浮动席位模式：以“活跃租约”（心跳/校验窗口内）计数并发，
+                    # 不占用固定设备位；席位满时拒绝本次上线（返回 seats_full，
+                    # 不触发换机风控——属于正常竞争，由客户端稍后重试）。
+                    since = security.shift_time_str(-int(self.seat_lease_seconds))
                     row = self._conn.execute(
                         "SELECT COUNT(*) AS n FROM activations"
-                        " WHERE license_id = ? AND status = 'active'",
-                        (license_id,),
+                        " WHERE license_id = ? AND status = 'active'"
+                        " AND (last_heartbeat_at >= ? OR last_verified_at >= ?"
+                        " OR activated_at >= ?)",
+                        (license_id, since, since, since),
                     ).fetchone()
-                    if int(row["n"]) >= max_devices:
+                    if int(row["n"]) >= max_concurrent:
                         self._conn.commit()
-                        return "limit", None, None
+                        return "seats_full", None, None
+                else:
+                    max_devices = int(lic["max_devices"] or 0)
+                    if max_devices:
+                        row = self._conn.execute(
+                            "SELECT COUNT(*) AS n FROM activations"
+                            " WHERE license_id = ? AND status = 'active'",
+                            (license_id,),
+                        ).fetchone()
+                        if int(row["n"]) >= max_devices:
+                            self._conn.commit()
+                            return "limit", None, None
 
                 if existing:
                     self._conn.execute(
@@ -1704,6 +1778,8 @@ class Database:
                         " expires_at = COALESCE(expires_at, ?) WHERE id = ?",
                         (now, effective_expiry, license_id),
                     )
+                if is_trial:
+                    self._record_trial_claim(machine, lic, code, now)
                 self._conn.commit()
                 return "activated", activation_id, effective_expiry
             except Exception:
@@ -1742,6 +1818,41 @@ class Database:
             "UPDATE activations SET last_verified_at = ? WHERE id = ?",
             (security.now_str(), activation_id),
         )
+
+    def _record_trial_claim(self, machine: str, lic, key_code: str, now: str) -> None:
+        """记录试用卡领取（同机同批次幂等；调用方须持有事务）。"""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO trial_claims (machine_code, batch_no, key_code,"
+            " claimed_at) VALUES (?, ?, ?, ?)",
+            (machine, str(lic["batch_no"] or ""), key_code, now),
+        )
+
+    def count_active_seats(self, key_code, since: str, exclude_machine: str = "") -> int:
+        """浮动席位：窗口内活跃（心跳/校验/首次激活）的设备数，可排除本机。"""
+        sql = (
+            "SELECT COUNT(*) AS n FROM activations WHERE key_code = ?"
+            " AND status = 'active' AND (last_heartbeat_at >= ? OR"
+            " last_verified_at >= ? OR activated_at >= ?)"
+        )
+        params: list = [security.normalize_key(key_code), str(since), str(since), str(since)]
+        if exclude_machine:
+            sql += " AND machine_code <> ?"
+            params.append(str(exclude_machine).strip().upper())
+        row = self._fetchone(sql, tuple(params))
+        return int(row["n"]) if row else 0
+
+    def activation_seat_active(self, activation, since: str) -> bool:
+        """该激活记录的租约是否仍在窗口内。"""
+        if not activation:
+            return False
+        for field in ("last_heartbeat_at", "last_verified_at", "activated_at"):
+            try:
+                value = str(activation[field] or "")
+            except (KeyError, IndexError, TypeError):
+                value = ""
+            if value and value >= str(since):
+                return True
+        return False
 
     def _seal_secret(self, value: str | None) -> str | None:
         """Encrypt a session secret before it touches the database file."""

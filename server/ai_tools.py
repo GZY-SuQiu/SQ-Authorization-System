@@ -453,7 +453,13 @@ class ToolRegistry:
                     "duration_value": _integer("有效期数值，与 duration_unit 搭配；永久卡填 0", 0, 36500),
                     "duration_unit": _unit_schema(),
                     "activation_limit": _integer("次数卡的可激活台数（card_type=activation 时必填）", 1, 100000),
-                    "max_devices": _integer("每张时长卡可绑定设备数，默认 1", 1, 10000),
+                    "max_devices": _integer("每张时长卡可绑定设备数，默认 1（浮动席位模式下忽略）", 1, 10000),
+                    "max_concurrent": _integer(
+                        "浮动席位：同时在线数上限（0=关闭，按绑定设备数计）", 0, 10000
+                    ),
+                    "fixed_expires_at": _string(
+                        "固定到期时间 YYYY-MM-DD HH:MM:SS（提供后该批卡为固定到期模式）"
+                    ),
                     "edition": _string("版本标识，默认 standard"),
                     "features": {
                         "type": "array",
@@ -629,8 +635,12 @@ class ToolRegistry:
     def _generate(self, args: dict, operator: dict, ip: str) -> dict:
         count = _as_int(args.get("count", 1), "count", 1, 500)
         card_type = _as_text(args.get("card_type", "duration"), "card_type").lower()
-        if card_type not in ("duration", "activation"):
-            raise ToolError("card_type 只能是 duration 或 activation")
+        if card_type not in ("duration", "activation", "trial"):
+            raise ToolError("card_type 只能是 duration、activation 或 trial")
+        max_concurrent = _as_int(args.get("max_concurrent", 0), "max_concurrent", 0, 10000)
+        fixed_expires_at = _as_text(
+            args.get("fixed_expires_at"), "fixed_expires_at", max_length=32
+        )
         edition = _as_text(args.get("edition", "standard"), "edition", max_length=32) or "standard"
         note = _as_text(args.get("note"), "note", max_length=500)
         prefix = _as_text(args.get("prefix"), "prefix", max_length=16) or self.prefix
@@ -640,6 +650,48 @@ class ToolRegistry:
             feature_list = security.normalize_features(args.get("features"))
         except ValueError as exc:
             raise ToolError(str(exc)) from None
+        if card_type == "trial":
+            trial_value = _as_int(
+                args.get("duration_value", args.get("duration_days", 0)),
+                "duration_value",
+                0,
+                36500,
+            )
+            trial_unit = _as_unit(args.get("duration_unit"), "day")
+            if trial_value <= 0 and not fixed_expires_at:
+                raise ToolError("试用卡必须设置大于 0 的有效期或固定到期时间")
+            trial_devices = _as_int(args.get("max_devices", 1), "max_devices", 1, 10000)
+            batch_no, keys = self.db.generate_licenses(
+                count=count,
+                edition=edition,
+                duration_days=trial_value,
+                max_devices=trial_devices,
+                note=note,
+                created_by=operator.get("username", ""),
+                prefix=prefix.upper(),
+                duration_unit=trial_unit,
+                card_type="trial",
+                features=feature_list,
+                max_concurrent=max_concurrent,
+                expiry_mode="fixed" if fixed_expires_at else "relative",
+                fixed_expires_at=fixed_expires_at or None,
+            )
+            self._log(
+                "AI生成密钥",
+                operator,
+                batch_no,
+                f"试用卡 {count} 张 · {security.duration_text(trial_value, trial_unit)}",
+                ip,
+            )
+            return {
+                "ok": True,
+                "batch_no": batch_no,
+                "count": len(keys),
+                "keys": keys,
+                "card_type": "trial",
+                "duration": security.duration_text(trial_value, trial_unit),
+                "max_devices": trial_devices,
+            }
         if card_type == "activation":
             limit = _as_int(args.get("activation_limit", 0), "activation_limit", 1, 100000)
             batch_no, keys = self.db.generate_licenses(
@@ -680,6 +732,9 @@ class ToolRegistry:
             prefix=prefix.upper(),
             duration_unit=unit,
             features=feature_list,
+            max_concurrent=max_concurrent,
+            expiry_mode="fixed" if fixed_expires_at else "relative",
+            fixed_expires_at=fixed_expires_at or None,
         )
         self._log(
             "AI生成密钥",

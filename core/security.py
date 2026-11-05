@@ -342,6 +342,15 @@ def features_from_text(text) -> list[str]:
     return [str(item) for item in data if isinstance(item, str) and item]
 
 
+def shift_time_str(seconds: int) -> str:
+    """当前时间偏移若干秒后的 TIME_FORMAT 字符串（负值为过去）。
+
+    浮动席位的活跃窗口比较依赖字符串形态的 TIME_FORMAT：同一格式的字符串
+    按字典序比较等价于按时间比较，避免逐行解析 datetime。
+    """
+    return (datetime.now() + timedelta(seconds=int(seconds))).strftime(TIME_FORMAT)
+
+
 def _b64e(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 

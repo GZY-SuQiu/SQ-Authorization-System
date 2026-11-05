@@ -415,6 +415,7 @@ class GeneratePage(BasePage):
         self.card_mode = QComboBox()
         self.card_mode.addItem("时长卡", "duration")
         self.card_mode.addItem("激活次数卡", "activation")
+        self.card_mode.addItem("试用卡", "trial")
         self.card_mode.currentIndexChanged.connect(
             lambda _index: self._on_mode_changed()
         )
@@ -442,6 +443,15 @@ class GeneratePage(BasePage):
         self.prefix = QLineEdit("GSQ")
         self.features = QLineEdit()
         self.features.setPlaceholderText("选填，逗号分隔，如：pro,cloud,export")
+        self.max_concurrent = QSpinBox()
+        self.max_concurrent.setRange(0, 999)
+        self.max_concurrent.setSpecialValueText("关闭")
+        self.max_concurrent.setToolTip("浮动席位：限制同时在线数（0=按绑定设备数计）")
+        self.fixed_expiry = QCheckBox("固定到期日")
+        self.fixed_expiry_value = QLineEdit()
+        self.fixed_expiry_value.setPlaceholderText("YYYY-MM-DD HH:MM:SS")
+        self.fixed_expiry_value.setEnabled(False)
+        self.fixed_expiry.toggled.connect(self.fixed_expiry_value.setEnabled)
         self.note = QLineEdit()
         self.note.setPlaceholderText("选填，如：某客户/某活动")
         form.addRow("生成数量", self.count)
@@ -453,6 +463,8 @@ class GeneratePage(BasePage):
         form.addRow("可绑定设备", self.devices)
         form.addRow("密钥前缀", self.prefix)
         form.addRow("功能位", self.features)
+        form.addRow("并发席位", self.max_concurrent)
+        form.addRow(self.fixed_expiry, self.fixed_expiry_value)
         form.addRow("备注", self.note)
         self._on_mode_changed()
         form_card.body.addLayout(form)
@@ -529,6 +541,9 @@ class GeneratePage(BasePage):
         self.devices.setValue(0)
         self.prefix.setText("GSQ")
         self.features.clear()
+        self.max_concurrent.setValue(0)
+        self.fixed_expiry.setChecked(False)
+        self.fixed_expiry_value.clear()
         self.note.clear()
         self.notify("生成参数已重置", "success")
 
@@ -536,6 +551,11 @@ class GeneratePage(BasePage):
         activation = self.card_mode.currentData() == "activation"
         try:
             feature_text = self.features.text().strip()
+            fixed_expiry = (
+                self.fixed_expiry_value.text().strip()
+                if self.fixed_expiry.isChecked()
+                else ""
+            )
             data = self.client.generate_licenses(
                 count=self.count.value(),
                 edition=self.edition.currentData(),
@@ -544,6 +564,9 @@ class GeneratePage(BasePage):
                 duration_days=0 if activation else self.duration.value(),
                 duration_unit="day" if activation else self.unit.currentData(),
                 max_devices=0 if activation else self.devices.value(),
+                max_concurrent=0 if activation else self.max_concurrent.value(),
+                expiry_mode="fixed" if fixed_expiry else "relative",
+                fixed_expires_at=fixed_expiry,
                 features=[
                     part.strip()
                     for part in feature_text.replace("，", ",").split(",")
@@ -674,17 +697,24 @@ class DetailDialog(QDialog):
             self.notify(str(exc), "error")
             return
         lic = data["license"]
-        if (lic.get("card_type") or "duration") == "activation":
+        card_kind = lic.get("card_type") or "duration"
+        if card_kind == "activation":
             usage = (
                 f"卡密模式：激活次数卡    激活次数：{lic['activation_count']} "
                 f"/ {lic['activation_limit']} 次"
             )
             validity = "有效期：不限（次数用尽后自动吊销）"
         else:
-            usage = "卡密模式：时长卡"
-            validity = (
-                f"有效期：{duration_text(lic['duration_days'], lic.get('duration_unit'))}"
-            )
+            usage = "卡密模式：试用卡" if card_kind == "trial" else "卡密模式：时长卡"
+            if str(lic.get("expiry_mode") or "relative") == "fixed":
+                validity = f"有效期：固定至 {lic['expires_at'] or '—'}"
+            else:
+                validity = (
+                    f"有效期：{duration_text(lic['duration_days'], lic.get('duration_unit'))}"
+                )
+            seats = int(lic.get("max_concurrent") or 0)
+            if seats > 0:
+                validity += f"    并发席位：{seats}"
         state = card_status_text(lic) or status_text(lic["status"])
         feature_values = lic.get("features")
         if not isinstance(feature_values, list):

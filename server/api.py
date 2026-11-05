@@ -288,6 +288,35 @@ def _activation_fields(lic: dict | None) -> dict:
     }
 
 
+def _seat_fields(db: Database, lic: dict | None, lease_seconds: int = 90,
+                 exclude_machine: str = "") -> dict:
+    """浮动席位下发字段（仅 max_concurrent>0 的卡返回，其余不改变响应形态）。"""
+    if not lic:
+        return {}
+    try:
+        max_concurrent = int(lic.get("max_concurrent") or 0)
+    except (TypeError, ValueError):
+        max_concurrent = 0
+    if max_concurrent <= 0:
+        return {}
+    lease = max(30, int(lease_seconds or 90))
+    since = security.shift_time_str(-lease)
+    try:
+        in_use = db.count_active_seats(
+            str(lic.get("key_code") or ""), since, exclude_machine=exclude_machine
+        )
+    except Exception:
+        in_use = 0
+    return {
+        "seats": {
+            "limit": max_concurrent,
+            "in_use": in_use,
+            "left": max(0, max_concurrent - in_use),
+            "lease_seconds": lease,
+        }
+    }
+
+
 def do_activate(
     db: Database,
     key_code: str,
@@ -295,6 +324,7 @@ def do_activate(
     device_name: str,
     ip: str,
     session_secret: str,
+    seat_lease_seconds: int = 90,
 ) -> dict:
     key_code = security.normalize_key(key_code)
     machine_code = (machine_code or "").strip().upper()
@@ -349,6 +379,21 @@ def do_activate(
             "code": "limit",
             "message": f"该密钥最多绑定 {max_devices} 台设备，已达上限",
         }
+    if result == "seats_full":
+        db.add_log("激活失败", "client", key_code, "并发席位已满", ip)
+        max_concurrent = int(lic["max_concurrent"] or 0)
+        return {
+            "ok": False,
+            "code": "seats_full",
+            "message": f"当前并发席位已满（上限 {max_concurrent}），请稍后再试",
+        }
+    if result == "trial_used":
+        db.add_log("激活失败", "client", key_code, "试用卡重复领取", ip)
+        return {
+            "ok": False,
+            "code": "trial_used",
+            "message": "该设备已领取过本批次的试用卡",
+        }
     if result == "exhausted":
         db.add_log("激活失败", "client", key_code, "激活次数已用尽", ip)
         return {
@@ -381,6 +426,7 @@ def do_activate(
     }
     payload.update(_activation_fields(fresh))
     payload["features"] = security.features_from_text(fresh.get("features"))
+    payload.update(_seat_fields(db, fresh, seat_lease_seconds))
     if payload.get("activation_left") == 0:
         payload["message"] += "，该密钥激活次数已用尽"
     return payload
@@ -462,6 +508,9 @@ class GenerateBody(SafeModel):
     duration_unit: str = Field(default="day", max_length=16)
     activation_limit: int = Field(default=0, ge=0, le=100000)
     max_devices: int = Field(default=1, ge=0, le=10000)
+    max_concurrent: int = Field(default=0, ge=0, le=10000)
+    expiry_mode: str = Field(default="relative", max_length=16)
+    fixed_expires_at: str = Field(default="", max_length=32)
     features: list[str] = Field(default_factory=list, max_length=32)
     note: str = Field(default="", max_length=500)
     prefix: str = Field(default="", max_length=16)
@@ -1918,8 +1967,25 @@ def create_app(
     @app.post("/api/license/generate")
     def generate(body: GenerateBody, admin: dict = Depends(current_admin)):
         card_type = (body.card_type or "duration").strip().lower()
-        if card_type not in ("duration", "activation"):
+        if card_type not in ("duration", "activation", "trial"):
             raise HTTPException(status_code=400, detail="不支持的卡密模式")
+        expiry_mode = (body.expiry_mode or "relative").strip().lower()
+        if expiry_mode not in ("relative", "fixed"):
+            raise HTTPException(status_code=400, detail="不支持的到期模式")
+        fixed_expires = str(body.fixed_expires_at or "").strip()
+        if expiry_mode == "fixed":
+            if card_type == "activation":
+                raise HTTPException(status_code=400, detail="次数卡不支持固定到期日")
+            parsed_fixed = security.parse_expiry(fixed_expires)
+            if parsed_fixed is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="固定到期时间格式无效（应为 YYYY-MM-DD HH:MM:SS）",
+                )
+            if parsed_fixed <= datetime.now():
+                raise HTTPException(
+                    status_code=400, detail="固定到期时间必须晚于当前时间"
+                )
         if card_type == "activation":
             if body.activation_limit < 1:
                 raise HTTPException(
@@ -1929,6 +1995,15 @@ def create_app(
             unit = "day"
             duration_days = 0
             max_devices = 0
+        elif card_type == "trial":
+            if body.duration_days <= 0 and expiry_mode != "fixed":
+                raise HTTPException(
+                    status_code=400,
+                    detail="试用卡必须设置大于 0 的有效期或固定到期日",
+                )
+            unit = checked_unit(body.duration_days, body.duration_unit)
+            duration_days = body.duration_days
+            max_devices = body.max_devices
         else:
             unit = checked_unit(body.duration_days, body.duration_unit)
             duration_days = body.duration_days
@@ -1949,6 +2024,9 @@ def create_app(
             card_type=card_type,
             activation_limit=body.activation_limit,
             features=feature_list,
+            max_concurrent=body.max_concurrent,
+            expiry_mode=expiry_mode,
+            fixed_expires_at=fixed_expires or None,
         )
         detail = f"共 {len(keys)} 个"
         if card_type == "activation":
@@ -2123,6 +2201,8 @@ def create_app(
         existing = db.get_license(body.key_code)
         if existing and is_activation_card(existing):
             raise HTTPException(status_code=400, detail="激活次数卡按次数使用，不支持续期")
+        if existing and str(existing.get("card_type") or "") == "trial":
+            raise HTTPException(status_code=400, detail="试用卡不支持续期")
         unit = checked_unit(body.duration_days, body.duration_unit)
         result = db.renew_license(
             body.key_code, body.duration_days, unit
@@ -2856,6 +2936,7 @@ def create_app(
             body.device_name,
             ip,
             session_secret,
+            seat_lease_seconds=int(config.security.get("seat_lease_seconds", 90) or 90),
         )
         if result.get("code") == "limit":
             # A new machine on a full licence: a change seen from a network the
@@ -3028,6 +3109,29 @@ def create_app(
                 "next_interval": interval,
                 "server_ts": server_ts,
             }
+        # 浮动席位：本机租约已过期而席位又被占满时，本次上线等待下一窗口。
+        lease = max(30, int(config.security.get("seat_lease_seconds", 90) or 90))
+        max_concurrent = int((lic or {}).get("max_concurrent") or 0)
+        if max_concurrent > 0:
+            since = security.shift_time_str(-lease)
+            if not db.activation_seat_active(act, since):
+                in_use = db.count_active_seats(
+                    key_code, since, exclude_machine=machine_code
+                )
+                if in_use >= max_concurrent:
+                    return {
+                        "ok": False,
+                        "code": "seats_full",
+                        "message": f"并发席位已满（上限 {max_concurrent}），请稍后重试",
+                        "next_interval": interval,
+                        "server_ts": server_ts,
+                        "seats": {
+                            "limit": max_concurrent,
+                            "in_use": in_use,
+                            "left": 0,
+                            "lease_seconds": lease,
+                        },
+                    }
         db.touch_heartbeat(act["id"])
         _after_client_ip(key_code, machine_code, ip)
         payload = {
@@ -3044,6 +3148,7 @@ def create_app(
         payload.update(_activation_fields(lic))
         if lic is not None:
             payload["features"] = security.features_from_text(lic.get("features"))
+            payload.update(_seat_fields(db, lic, lease, machine_code))
         return payload
 
 
