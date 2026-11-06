@@ -93,6 +93,14 @@ def _find_sevenzip(explicit: str | None) -> str:
         found = shutil.which(name)
         if found:
             return found
+    # Windows 常见安装位置（PATH 未加入时兜底）
+    for candidate in (
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+        "/usr/bin/7zz",
+    ):
+        if Path(candidate).is_file():
+            return candidate
     raise SystemExit("未找到 7z 打包工具（7zz / 7z）")
 
 

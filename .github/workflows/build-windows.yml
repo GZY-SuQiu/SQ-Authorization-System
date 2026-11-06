@@ -12,6 +12,10 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Windows 英文 runner 默认 cp1252，中文输出会崩：强制 UTF-8
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
