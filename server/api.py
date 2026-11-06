@@ -325,6 +325,7 @@ def do_activate(
     ip: str,
     session_secret: str,
     seat_lease_seconds: int = 90,
+    machine_components: dict | None = None,
 ) -> dict:
     key_code = security.normalize_key(key_code)
     machine_code = (machine_code or "").strip().upper()
@@ -364,6 +365,7 @@ def do_activate(
         device_name,
         expiry,
         session_secret,
+        machine_components=machine_components,
     )
     if result == "not_found":
         db.add_log("激活失败", "client", key_code, "密钥不存在", ip)
@@ -406,8 +408,9 @@ def do_activate(
         return {"ok": False, "code": "internal_error", "message": "激活记录创建失败"}
 
     is_already = result == "already"
+    is_rebound = result == "rebound"
     db.add_log(
-        "激活成功" if not is_already else "重复激活",
+        "硬件变更置换" if is_rebound else ("激活成功" if not is_already else "重复激活"),
         "client",
         key_code,
         f"设备 {device_name or machine_code}",
@@ -417,7 +420,15 @@ def do_activate(
     payload = {
         "ok": True,
         "code": "already" if is_already else "activated",
-        "message": "该设备已激活" if is_already else "激活成功",
+        "message": (
+            "该设备已激活"
+            if is_already
+            else (
+                "已识别为同机硬件变更，绑定已自动更新"
+                if is_rebound
+                else "激活成功"
+            )
+        ),
         "session_secret": session_secret,
         "expires_at": effective_expiry,
         "days_left": security.days_left(effective_expiry),
@@ -567,6 +578,8 @@ class ActivateBody(SafeModel):
     key_code: str = Field(min_length=1, max_length=128)
     machine_code: str = Field(min_length=1, max_length=128)
     device_name: str = Field(default="", max_length=128)
+    # 分量指纹（可选）：设备满员时用于"同机硬件变更"容错置换。
+    machine_components: dict | None = Field(default=None)
 
 
 class OfflineCodeBody(SafeModel):
@@ -2306,6 +2319,46 @@ def create_app(
         )
         return {"ok": True}
 
+    @app.post("/api/license/rebind")
+    def rebind(body: KeyBody, request: Request, admin: dict = Depends(current_admin)):
+        """一键换绑：解冻（如需）+ 解绑全部活跃设备，便于用户在新设备重新激活。"""
+        key_code = security.normalize_key(body.key_code)
+        lic = db.get_license(key_code)
+        if not lic:
+            raise HTTPException(status_code=404, detail="密钥不存在")
+        unfrozen = False
+        if str(lic["status"]) == "frozen":
+            target = db.unfreeze_license(key_code)
+            if isinstance(target, str) and target.startswith("__"):
+                raise HTTPException(
+                    status_code=400, detail="该密钥无法解冻（已过期或次数用尽）"
+                )
+            unfrozen = True
+        activations = db.list_activations(key_code)
+        unbound = 0
+        for item in activations:
+            if str(item.get("status") or "") == "active":
+                if db.unbind_activation(key_code, item["machine_code"]):
+                    unbound += 1
+        db.add_log(
+            "换绑准备",
+            admin["username"],
+            key_code,
+            f"解冻{'是' if unfrozen else '否'} · 解绑 {unbound} 台",
+            _client_ip(request),
+        )
+        return {
+            "ok": True,
+            "unfrozen": unfrozen,
+            "unbound": unbound,
+            "message": "换绑准备完成：已解冻并清空设备绑定，请用户在新设备重新激活。",
+            "guide": (
+                f"密钥 {key_code} 已完成换绑准备。\n"
+                "请在新设备打开验证端，输入卡密并点击「激活」。\n"
+                "如提示设备数已达上限，请联系管理员。"
+            ),
+        }
+
     @app.get("/api/license/stats")
     def stats(admin: dict = Depends(current_admin)):
         return db.stats_cached()
@@ -2937,6 +2990,7 @@ def create_app(
             ip,
             session_secret,
             seat_lease_seconds=int(config.security.get("seat_lease_seconds", 90) or 90),
+            machine_components=body.machine_components,
         )
         if result.get("code") == "limit":
             # A new machine on a full licence: a change seen from a network the

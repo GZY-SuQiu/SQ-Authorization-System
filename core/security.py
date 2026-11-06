@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import random
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -349,6 +350,51 @@ def shift_time_str(seconds: int) -> str:
     按字典序比较等价于按时间比较，避免逐行解析 datetime。
     """
     return (datetime.now() + timedelta(seconds=int(seconds))).strftime(TIME_FORMAT)
+
+
+# --------------------------------------------------------------------------- #
+# 出站脱敏（AI 数据出境保护）
+# --------------------------------------------------------------------------- #
+# 卡密：<前缀 2~8 字母>-<5 字符>×4（前缀保留、中间两组遮蔽、尾组可用于人工比对）
+_KEY_SHAPE_RE = re.compile(
+    r"\b([A-Z]{2,8})-([A-Z0-9]{5})-([A-Z0-9]{5})-([A-Z0-9]{5})-([A-Z0-9]{5})\b"
+)
+# 机器码：纯 5 组 5 字符（保留首尾组）
+_MACHINE_SHAPE_RE = re.compile(
+    r"\b([A-Z0-9]{5})-([A-Z0-9]{5})-([A-Z0-9]{5})-([A-Z0-9]{5})-([A-Z0-9]{5})\b"
+)
+# 邮箱：保留首字符 + 域名
+_EMAIL_SHAPE_RE = re.compile(
+    r"([A-Za-z0-9._%+-]{1,64})@([A-Za-z0-9.-]{1,189}\.[A-Za-z]{2,63})"
+)
+
+
+def redact_sensitive_text(text: str) -> str:
+    """遮蔽字符串中的卡密 / 机器码 / 邮箱（用于 AI 出站数据与日志场景）。"""
+    value = str(text or "")
+    if not value:
+        return value
+    value = _KEY_SHAPE_RE.sub(
+        lambda m: f"{m.group(1)}-{m.group(2)}-***-***-{m.group(5)}", value
+    )
+    value = _MACHINE_SHAPE_RE.sub(
+        lambda m: f"{m.group(1)}-***-***-***-{m.group(5)}", value
+    )
+    value = _EMAIL_SHAPE_RE.sub(
+        lambda m: f"{m.group(1)[:1]}***@{m.group(2)}", value
+    )
+    return value
+
+
+def redact_structure(value):
+    """递归地对 dict/list/str 结构应用 :func:`redact_sensitive_text`。"""
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {key: redact_structure(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_structure(item) for item in value]
+    return value
 
 
 def _b64e(data: bytes) -> str:

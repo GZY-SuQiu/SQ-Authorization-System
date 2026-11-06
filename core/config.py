@@ -104,6 +104,9 @@ AI_DEFAULT_CONFIG = {
     "timeout_seconds": 60,
     "monitor_interval": 8,
     "history_limit": 20,
+    # 出站脱敏：工具结果发往上游 LLM 前遮蔽卡密/机器码/邮箱（默认开启；
+    # 管理端展示与审计保留原文）。
+    "redact_tool_output": True,
     "system_prompt": (
         "You are the built-in operations assistant for the licence system. "
         "Always answer in Simplified Chinese. You may call tools to query and "

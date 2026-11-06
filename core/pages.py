@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QProgressDialog,
     QSpinBox,
@@ -688,6 +689,30 @@ class DetailDialog(QDialog):
         for col in range(1, 5):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
         layout.addWidget(self.table, 1)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        actions.addWidget(make_button("一键换绑", "default", self.rebind))
+        layout.addLayout(actions)
+        self.load()
+
+    def rebind(self) -> None:
+        """一键换绑：解冻 + 解绑全部设备 + 引导文案。"""
+        answer = QMessageBox.question(
+            self,
+            "一键换绑",
+            f"将对密钥 {self.key_code} 执行：解冻（如需）并解绑全部设备。\n"
+            "完成后用户可在新设备重新激活。是否继续？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            data = self.client.rebind_license(self.key_code)
+        except ApiError as exc:
+            self.notify(str(exc), "error")
+            return
+        QMessageBox.information(
+            self, "换绑完成", data.get("guide") or data.get("message") or "已处理。"
+        )
         self.load()
 
     def load(self) -> None:

@@ -177,6 +177,14 @@ class LicenseClient:
         if not key:
             raise LicenseError("密钥不能为空", code="bad_request")
         target_machine = str(machine_code or "").strip().upper() or self.machine_code()
+        components: dict = {}
+        if not machine_code:
+            # 仅当使用本机机器码时附带分量指纹（服务端"同机硬件变更"容错用）；
+            # 显式传入自定义机器码时不参与容错判定，避免误置换。
+            try:
+                components = machine.fingerprint_components() or {}
+            except Exception:
+                components = {}
         data = self._request(
             "POST",
             "/api/client/activate",
@@ -184,6 +192,7 @@ class LicenseClient:
                 "key_code": key,
                 "machine_code": target_machine,
                 "device_name": str(device_name or "").strip(),
+                "machine_components": components,
             },
         )
         secret = data.get("session_secret")

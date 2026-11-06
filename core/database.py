@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS activations (
     session_secret   TEXT,
     last_heartbeat_at TEXT,
     heartbeat_count  INTEGER NOT NULL DEFAULT 0,
+    machine_components TEXT,
     UNIQUE(key_code, machine_code)
 );
 
@@ -357,6 +358,7 @@ MIGRATIONS = {
         "session_secret": "TEXT",
         "last_heartbeat_at": "TEXT",
         "heartbeat_count": "INTEGER NOT NULL DEFAULT 0",
+        "machine_components": "TEXT",
     },
     "portal_accounts": {
         "display_name": "TEXT NOT NULL DEFAULT ''",
@@ -1621,12 +1623,27 @@ class Database:
         device_name: str,
         expires_at: str | None,
         session_secret: str | None = None,
+        machine_components: dict | None = None,
     ) -> tuple[str, int | None, str | None]:
         """Atomically check the seat limit and create/reactivate one binding."""
         session_secret = self._seal_secret(session_secret)
         code = security.normalize_key(key_code)
         machine = (machine_code or "").strip().upper()
         now = security.now_str()
+        components_text = None
+        if isinstance(machine_components, dict) and machine_components:
+            try:
+                cleaned = {
+                    str(key)[:16]: str(value)[:64]
+                    for key, value in list(machine_components.items())[:8]
+                    if str(value or "").strip()
+                }
+                if cleaned:
+                    components_text = json.dumps(
+                        cleaned, ensure_ascii=False, separators=(",", ":")
+                    )
+            except Exception:
+                components_text = None
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1684,8 +1701,16 @@ class Database:
                     self._conn.execute(
                         "UPDATE activations SET device_name = ?, last_verified_at = ?,"
                         " session_secret = COALESCE(?, session_secret),"
+                        " machine_components = COALESCE(?, machine_components),"
                         " expires_at = COALESCE(?, expires_at) WHERE id = ?",
-                        (device_name, now, session_secret, effective_expiry, existing["id"]),
+                        (
+                            device_name,
+                            now,
+                            session_secret,
+                            components_text,
+                            effective_expiry,
+                            existing["id"],
+                        ),
                     )
                     if is_trial:
                         self._record_trial_claim(machine, lic, code, now)
@@ -1717,6 +1742,19 @@ class Database:
                             (license_id,),
                         ).fetchone()
                         if int(row["n"]) >= max_devices:
+                            # 同机硬件变更容错：分量指纹证明是同一设备时，
+                            # 直接把旧绑定置换为新机器码（不新增占用）。
+                            rebound_id = self._try_rebind_activation(
+                                license_id,
+                                machine,
+                                device_name,
+                                components_text,
+                                now,
+                                session_secret,
+                            )
+                            if rebound_id is not None:
+                                self._conn.commit()
+                                return "rebound", rebound_id, effective_expiry
                             self._conn.commit()
                             return "limit", None, None
 
@@ -1724,13 +1762,15 @@ class Database:
                     self._conn.execute(
                         "UPDATE activations SET status = 'active', device_name = ?,"
                         " activated_at = ?, expires_at = ?, last_verified_at = ?,"
-                        " session_secret = COALESCE(?, session_secret) WHERE id = ?",
+                        " session_secret = COALESCE(?, session_secret),"
+                        " machine_components = COALESCE(?, machine_components) WHERE id = ?",
                         (
                             device_name,
                             now,
                             effective_expiry,
                             now,
                             session_secret,
+                            components_text,
                             existing["id"],
                         ),
                     )
@@ -1739,8 +1779,8 @@ class Database:
                     cur = self._conn.execute(
                         "INSERT INTO activations (license_id, key_code, machine_code,"
                         " device_name, status, activated_at, expires_at,"
-                        " last_verified_at, session_secret)"
-                        " VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+                        " last_verified_at, session_secret, machine_components)"
+                        " VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
                         (
                             license_id,
                             code,
@@ -1750,6 +1790,7 @@ class Database:
                             effective_expiry,
                             now,
                             session_secret,
+                            components_text,
                         ),
                     )
                     activation_id = cur.lastrowid
@@ -1818,6 +1859,59 @@ class Database:
             "UPDATE activations SET last_verified_at = ? WHERE id = ?",
             (security.now_str(), activation_id),
         )
+
+    def _try_rebind_activation(
+        self,
+        license_id: int,
+        machine: str,
+        device_name: str,
+        components_text: str | None,
+        now: str,
+        session_secret: str | None,
+    ) -> int | None:
+        """设备满员时尝试"同机硬件变更"置换（调用方须持有事务）。
+
+        找到分量指纹判定为同一台机器的活跃绑定，把其机器码更新为新码
+        （保持原有绑定位与记录，不新增占用）。返回激活 id 或 None。
+        """
+        if not components_text:
+            return None
+        try:
+            new_components = json.loads(components_text)
+        except Exception:
+            return None
+        from . import machine as machine_module
+
+        rows = self._conn.execute(
+            "SELECT id, machine_code, machine_components FROM activations"
+            " WHERE license_id = ? AND status = 'active'",
+            (license_id,),
+        ).fetchall()
+        for row in rows:
+            stored = str(row["machine_components"] or "")
+            if not stored:
+                continue
+            try:
+                old_components = json.loads(stored)
+            except Exception:
+                continue
+            if machine_module.same_machine_by_components(new_components, old_components):
+                self._conn.execute(
+                    "UPDATE activations SET machine_code = ?, device_name = ?,"
+                    " machine_components = ?, activated_at = ?, last_verified_at = ?,"
+                    " session_secret = COALESCE(?, session_secret) WHERE id = ?",
+                    (
+                        machine,
+                        device_name,
+                        components_text,
+                        now,
+                        now,
+                        session_secret,
+                        row["id"],
+                    ),
+                )
+                return int(row["id"])
+        return None
 
     def _record_trial_claim(self, machine: str, lic, key_code: str, now: str) -> None:
         """记录试用卡领取（同机同批次幂等；调用方须持有事务）。"""

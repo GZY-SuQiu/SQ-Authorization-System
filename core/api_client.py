@@ -677,6 +677,12 @@ class ApiClient:
             },
         )
 
+    def rebind_license(self, key_code: str) -> dict:
+        """一键换绑：解冻（如需）+ 解绑全部设备。"""
+        return self._request(
+            "POST", "/api/license/rebind", json_body={"key_code": key_code}
+        )
+
     def revoke_license(self, key_code: str) -> dict:
         return self._request(
             "POST", "/api/license/revoke", json_body={"key_code": key_code}
@@ -1010,6 +1016,13 @@ class ApiClient:
         query = {"limit": limit, **params}
         return self._request("GET", "/api/logs", params=query)
 
+    def _machine_components(self) -> dict:
+        """本机分量指纹（失败时为空 dict，不影响激活本身）。"""
+        try:
+            return machine.fingerprint_components() or {}
+        except Exception:
+            return {}
+
     def activate(self, key_code: str, machine_code: str, device_name: str = "") -> dict:
         # Activation is the point where the client receives its session secret.
         # It must be authenticated by a pinned asymmetric server key rather than
@@ -1024,6 +1037,7 @@ class ApiClient:
                 "key_code": key_code,
                 "machine_code": machine_code,
                 "device_name": device_name,
+                "machine_components": self._machine_components(),
             },
             require_signature=True,
             attest_token=attest_token,

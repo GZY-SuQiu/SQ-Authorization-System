@@ -20,6 +20,7 @@ WRITE_TOOL_NAMES = frozenset(
     {
         "generate_licenses",
         "set_license_status",
+        "rebind_license",
         "renew_licenses",
         "delete_licenses",
         "unbind_device",
@@ -40,6 +41,21 @@ _ACTION_LABELS = {
 
 class ToolError(Exception):
     """Raised when a tool call cannot be completed or is not permitted."""
+
+
+# 提示注入特征（用于备注/原因等自由文本字段的审计告警；只告警不拦截）。
+_INJECTION_HINTS = (
+    "忽略之前的", "忽略以上", "忽略所有", "无视之前", "无视以上",
+    "ignore previous", "ignore all", "ignore above", "disregard",
+    "system prompt", "系统提示词", "系统指令", "新的指令", "指令如下",
+    "you are now", "从现在开始你",
+)
+
+
+def _scan_note_injection(text: str) -> bool:
+    """轻量提示注入特征扫描：命中仅记审计告警，不阻断业务。"""
+    value = str(text or "").lower()
+    return any(hint in value for hint in _INJECTION_HINTS)
 
 
 @dataclass(frozen=True)
@@ -533,6 +549,13 @@ class ToolRegistry:
             mutating=True,
         )
         add(
+            "rebind_license",
+            "一键换绑：解冻（如需）并解绑该密钥的全部活跃设备，便于用户在新设备重新激活。",
+            _obj({"key_code": _string("完整卡密", minLength=1)}, ["key_code"]),
+            self._rebind,
+            mutating=True,
+        )
+        add(
             "create_offline_code",
             "为时长卡生成离线激活码。次数卡、冻结、吊销、过期卡不可生成。",
             _obj(
@@ -643,6 +666,8 @@ class ToolRegistry:
         )
         edition = _as_text(args.get("edition", "standard"), "edition", max_length=32) or "standard"
         note = _as_text(args.get("note"), "note", max_length=500)
+        if note and _scan_note_injection(note):
+            self._log("AI操作告警", operator, "生成密钥", "备注疑似提示注入", ip)
         prefix = _as_text(args.get("prefix"), "prefix", max_length=16) or self.prefix
         if not all(ch.isalnum() or ch in "-_" for ch in prefix):
             raise ToolError("卡密前缀只能包含字母、数字、- 或 _")
@@ -753,6 +778,35 @@ class ToolRegistry:
             "max_devices": max_devices,
         }
 
+    def _rebind(self, args: dict, operator: dict, ip: str) -> dict:
+        """一键换绑：解冻（如需）+ 解绑全部活跃设备。"""
+        key_code = _as_text(args.get("key_code"), "key_code", required=True, max_length=128)
+        lic = self._license_or_fail(key_code)
+        unfrozen = False
+        if str(lic.get("status") or "") == "frozen":
+            target = self.db.unfreeze_license(lic["key_code"])
+            if isinstance(target, str) and target.startswith("__"):
+                raise ToolError("该密钥无法解冻（已过期或次数用尽）")
+            unfrozen = True
+        unbound = 0
+        for item in self.db.list_activations(lic["key_code"]):
+            if str(item.get("status") or "") == "active":
+                if self.db.unbind_activation(lic["key_code"], item["machine_code"]):
+                    unbound += 1
+        self._log(
+            "AI换绑准备",
+            operator,
+            lic["key_code"],
+            f"解冻{'是' if unfrozen else '否'} · 解绑 {unbound} 台",
+            ip,
+        )
+        return {
+            "ok": True,
+            "unfrozen": unfrozen,
+            "unbound": unbound,
+            "guide": f"密钥 {lic['key_code']} 已完成换绑准备，请用户在新设备重新激活。",
+        }
+
     def _targets(self, args: dict) -> list[str]:
         key_codes = args.get("key_codes") or []
         batch_no = _as_text(args.get("batch_no"), "batch_no", max_length=128)
@@ -791,6 +845,8 @@ class ToolRegistry:
         targets = self._targets(args)
         frozen_until = ""
         reason = _as_text(args.get("reason"), "reason", max_length=200)
+        if reason and _scan_note_injection(reason):
+            self._log("AI操作告警", operator, batch_no or "多个密钥", "冻结原因疑似提示注入", ip)
         if action == "freeze":
             amount = _as_int(args.get("amount", 1), "amount", 1, 100000)
             unit = _as_unit(args.get("unit"), "hour")
