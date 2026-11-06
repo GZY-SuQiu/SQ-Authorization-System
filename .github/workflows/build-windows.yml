@@ -1,0 +1,52 @@
+name: build-windows-installer
+
+# 云端一键构建 Windows 安装包（无需本地环境）
+# 用法：仓库页 → Actions → 左侧 build-windows-installer → Run workflow → 等 10~15 分钟
+# 完成后在该次运行页面底部 Artifacts 处下载安装包。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 构建四端（PyInstaller）
+        run: python build.py
+
+      - name: 生成发布包（校验 + 便携版 ZIP）
+        run: python installer/make_package.py --release-package dist/release_package --output installer_out
+
+      - name: 制作安装器（7zSD 自解压）
+        run: python installer/make_sfx_installer.py --app installer_out/app --sfx installer/tools/7zsd_All_x64.sfx --output "installer_out/SQ-Installer-1.0.0.exe"
+
+      - name: 统一产物为 ASCII 名
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem installer_out/*.zip | Select-Object -First 1
+          if ($zip) { Copy-Item $zip.FullName installer_out/SQ-Portable-1.0.0.zip -Force }
+          Get-ChildItem installer_out | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
+
+      - name: 上传产物（安装包 + 便携版）
+        uses: actions/upload-artifact@v4
+        with:
+          name: SQ-Installer-1.0.0
+          path: |
+            installer_out/SQ-Installer-1.0.0.exe
+            installer_out/SQ-Portable-1.0.0.zip
+          retention-days: 30
