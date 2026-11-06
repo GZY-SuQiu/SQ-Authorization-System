@@ -191,6 +191,10 @@ SERVER_DEFAULT_CONFIG = {
         "retention_outbox_days": 30,
         # 后台维护线程的运行间隔（小时）。
         "maintenance_interval_hours": 24,
+        # 自动备份：随维护周期执行（数据库 + 服务器配置成对备份），
+        # 落 data/backups/auto/，按 backup_keep 份轮转（<=0 视为 1）。
+        "backup_auto_enabled": True,
+        "backup_keep": 14,
     },
     "client": copy.deepcopy(CLIENT_DEFAULT_CONFIG),
     "ai": copy.deepcopy(AI_DEFAULT_CONFIG),

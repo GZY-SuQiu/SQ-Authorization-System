@@ -8,6 +8,7 @@ import math
 import socket
 import threading
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import sqlite3
@@ -861,9 +862,13 @@ class MaintenanceWorker:
         db,
         retention: dict | None = None,
         interval_seconds: float = 86400.0,
+        backup: dict | None = None,
     ):
         self.db = db
         self.retention = dict(retention or {})
+        # 自动备份配置（B6-3）：{"enabled": bool, "keep": int,
+        # "dir": Path, "config_path": Path}；随维护周期执行。
+        self.backup = dict(backup or {})
         try:
             interval = float(interval_seconds)
         except (TypeError, ValueError):
@@ -875,6 +880,7 @@ class MaintenanceWorker:
         self.last_run_at: str | None = None
         self.last_deleted: dict | None = None
         self.last_error: str | None = None
+        self.last_backup: dict | None = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -917,13 +923,53 @@ class MaintenanceWorker:
     # Maintenance
     # ------------------------------------------------------------------ #
     def run_once(self) -> dict:
-        """Run one retention pass and remember when/how much it deleted."""
+        """Run one retention + backup pass and remember the results."""
         deleted = self.db.run_maintenance(self.retention)
+        backup_info = None
+        backup_error = None
+        try:
+            backup_info = self._run_backup()
+        except Exception as exc:  # 备份失败不阻断维护清理
+            backup_error = f"备份失败：{exc}"[:500]
         with self._lock:
             self.last_run_at = security.now_str()
             self.last_deleted = dict(deleted)
-            self.last_error = None
+            if backup_info is not None:
+                self.last_backup = dict(backup_info)
+            self.last_error = backup_error
         return deleted
+
+    def _run_backup(self) -> dict | None:
+        """自动备份：数据库 + 服务器配置成对写入备份目录并按份数轮转。"""
+        backup = getattr(self, "backup", None) or {}
+        if not backup.get("enabled"):
+            return None
+        target_dir = backup.get("dir")
+        if target_dir is None:
+            return None
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        db_target = target_dir / f"license_auto_{stamp}.db"
+        self.db.backup_to(db_target)
+        config_path = backup.get("config_path")
+        if config_path is not None:
+            try:
+                (target_dir / f"server_config_auto_{stamp}.json").write_bytes(
+                    Path(config_path).read_bytes()
+                )
+            except OSError:
+                pass
+        keep = max(1, int(backup.get("keep") or 14))
+        removed = 0
+        for pattern in ("license_auto_*.db", "server_config_auto_*.json"):
+            files = sorted(target_dir.glob(pattern))
+            for old in files[:-keep]:
+                try:
+                    old.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+        return {"path": str(db_target), "removed": removed, "at": security.now_str()}
 
     def status(self) -> dict:
         with self._lock:
@@ -932,6 +978,7 @@ class MaintenanceWorker:
                 "deleted": dict(self.last_deleted or {}),
                 "interval_seconds": round(self.interval, 3),
                 "last_error": self.last_error,
+                "last_backup": dict(self.last_backup) if self.last_backup else None,
             }
 
 
@@ -1359,6 +1406,12 @@ def create_app(
             db,
             retention=config.security,
             interval_seconds=interval_hours * 3600.0,
+            backup={
+                "enabled": bool(config.security.get("backup_auto_enabled", True)),
+                "keep": int(config.security.get("backup_keep", 14) or 14),
+                "dir": config.db_path().parent / "backups" / "auto",
+                "config_path": config.path,
+            },
         )
     start_maintenance = getattr(maintenance, "start", None)
     if callable(start_maintenance):

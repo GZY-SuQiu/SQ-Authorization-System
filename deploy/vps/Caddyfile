@@ -1,0 +1,7 @@
+# 把 license.example.com 换成你的域名（A 记录指向本机）。
+# Caddy 自动申请/续期 HTTPS 证书——客户端（验证端/SDK）要求 https，
+# 明文 http 会被客户端直接拒绝（除非显式允许内网测试）。
+license.example.com {
+    reverse_proxy sq-server:8765
+    encode gzip
+}
