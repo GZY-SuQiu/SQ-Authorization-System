@@ -726,6 +726,13 @@ class ApiClient:
             "POST", "/api/admin/delete", json_body={"admin_id": int(admin_id)}
         )
 
+    def approval_settings(self, enabled: bool, hint_text: str = "") -> dict:
+        return self._request(
+            "POST",
+            "/api/approvals/settings",
+            json_body={"enabled": bool(enabled), "hint_text": str(hint_text or "")},
+        )
+
     def transfer_request(self, key_code: str, target_email: str) -> dict:
         return self._request(
             "POST",

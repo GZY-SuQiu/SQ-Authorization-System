@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QTableWidget,
     QVBoxLayout,
 )
@@ -114,6 +115,8 @@ class UserAdminPage(BasePage):
         header_view.setSectionResizeMode(0, QHeaderView.Stretch)
         for col in range(1, len(self.COLUMNS)):
             header_view.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._ctx_menu)
         layout.addWidget(self.table, 1)
 
     # ------------------------------------------------------------ data
@@ -183,6 +186,45 @@ class UserAdminPage(BasePage):
             self.notify("请先选择一位用户", "warning")
             return None
         return self.accounts[row]
+
+    def _ctx_menu(self, pos) -> None:
+        if not self.table.indexAt(pos).isValid():
+            return
+        menu = QMenu(self)
+        menu.addAction("启用账号", self.enable_account)
+        menu.addAction("禁用账号", self.disable_account)
+        menu.addAction("强制脱绑", self.force_unbind)
+        menu.addSeparator()
+        menu.addAction("复制邮箱", self._copy_email)
+        menu.addAction("删除账号", self.delete_account)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _copy_email(self) -> None:
+        account = self._selected()
+        if account:
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(str(account.get("email") or ""))
+            self.notify("邮箱已复制", "success")
+
+    def delete_account(self) -> None:
+        """删除门户账号（二次确认；其卡密绑定随删除释放）。"""
+        account = self._selected()
+        if not account:
+            return
+        if not confirm(
+            self,
+            "删除账号",
+            f"确定删除 {account.get('email')}？\n该账号的卡密绑定将随之释放（不可撤销；日常建议使用禁用）。",
+        ):
+            return
+        try:
+            self.client.delete_portal_account(int(account["id"]))
+        except ApiError as exc:
+            self.notify(str(exc), "error")
+            return
+        self.notify("账号已删除", "success")
+        self.refresh()
 
     # --------------------------------------------------------- actions
     def enable_account(self) -> None:

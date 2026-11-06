@@ -1165,8 +1165,42 @@ class LicensesPage(BasePage):
         scope.addAction("解冻全部筛选结果", self.unfreeze_all_filtered)
         scope.addAction("续期全部筛选结果", self.renew_all_filtered)
         menu.addSeparator()
+        menu.addAction("查看详情", self.show_detail)
+        menu.addAction("二维码", self._show_selected_qr)
+        menu.addAction("解绑选中设备", self.unbind_selected)
+        menu.addSeparator()
         menu.addAction("删除密钥", self.delete_selected)
         return menu
+
+    def _show_selected_qr(self) -> None:
+        """选中卡密的二维码（扫码录入 / 分发）。"""
+        keys = selected_key_codes(self.table)
+        if not keys:
+            self.notify("请先选择一条密钥", "warning")
+            return
+        qr.show_qr_dialog(self, "卡密二维码", keys[0])
+
+    def unbind_selected(self) -> None:
+        """解绑：取选中行的密钥与硬件码执行解绑。"""
+        keys = selected_key_codes(self.table)
+        if not keys:
+            self.notify("请先选择一条密钥", "warning")
+            return
+        row = self.table.currentRow()
+        machine_item = self.table.item(row, 5) if row >= 0 else None
+        machine = machine_item.text().strip() if machine_item is not None else ""
+        if not machine or machine in ("—", "-"):
+            self.notify("该密钥当前没有绑定的硬件码", "warning")
+            return
+        if not confirm(self, "解绑设备", f"解绑 {keys[0]} 与设备 {machine} 的绑定？"):
+            return
+        try:
+            self.client.unbind(keys[0], machine)
+        except ApiError as exc:
+            self.notify(str(exc), "error")
+            return
+        self.notify("已解绑设备", "success")
+        self.refresh()
 
     def _show_ops_menu(self, pos) -> None:
         if not self.table.indexAt(pos).isValid():
@@ -1841,6 +1875,8 @@ class LogsPage(BasePage):
         header_view.setSectionResizeMode(4, QHeaderView.Stretch)
         for col in (0, 1, 2, 3, 5):
             header_view.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._ctx_menu)
         copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self.table)
         copy_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         copy_shortcut.activated.connect(self.copy_selected)
@@ -1899,6 +1935,32 @@ class LogsPage(BasePage):
         index = self.action.findData(current)
         self.action.setCurrentIndex(index if index >= 0 else 0)
         self.action.blockSignals(False)
+
+    def _ctx_menu(self, pos) -> None:
+        if not self.table.indexAt(pos).isValid():
+            return
+        menu = QMenu(self)
+        menu.addAction("复制详情", self._copy_detail)
+        menu.addAction("复制整行", self._copy_row)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _copy_detail(self) -> None:
+        row = self.table.currentRow()
+        item = self.table.item(row, 4) if row >= 0 else None
+        if item is not None:
+            QApplication.clipboard().setText(item.text())
+            self.notify("详情已复制", "success")
+
+    def _copy_row(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        values = []
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row, col)
+            values.append(item.text() if item is not None else "")
+        QApplication.clipboard().setText("\t".join(values))
+        self.notify("整行已复制", "success")
 
     def apply_filter(self) -> None:
         keyword = self.keyword.text().strip().lower()

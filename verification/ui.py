@@ -1219,6 +1219,12 @@ class VerifyWindow(QMainWindow):
             self.toast.show_message(message, "error")
             return
         self._persist_remembered_credentials(email, password)
+        if data.get("pending_approval"):
+            # 审批模式：注册已提交，等待管理员批准后方可登录。
+            message = str(data.get("message") or "注册已提交，等待管理员审批。")
+            self._set_portal_result("info", "已提交审批", message)
+            self.toast.show_message(message, "success", 7000)
+            return
         self._after_portal_authenticated(
             str(data.get("email") or email),
             data.get("binding") if isinstance(data.get("binding"), dict) else None,
@@ -2099,6 +2105,19 @@ class VerifyWindow(QMainWindow):
         key = self.input_key.text().strip()
         if not key:
             self.toast.show_message("请输入密钥", "warning")
+            return
+        # 新规：卡密须与账号绑定——未登录时引导先注册/登录（防滥用审核）。
+        if not self.portal_token_is_usable():
+            self.toast.show_message(
+                "请先在「邮箱登录」注册账号、登录并绑定卡密，再回到本页激活。",
+                "warning",
+                8000,
+            )
+            self._set_result(
+                "warning",
+                "需要账号绑定",
+                "按管理员要求：请先在「邮箱登录」注册/登录账号并绑定本卡密，然后回到本页点击激活。",
+            )
             return
         if not self._ensure_server_keys():
             return

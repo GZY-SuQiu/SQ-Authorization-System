@@ -656,6 +656,11 @@ class PortalTransferBody(SafeModel):
     target_email: str = Field(min_length=3, max_length=254)
 
 
+class ApprovalSettingsBody(SafeModel):
+    enabled: bool = True
+    hint_text: str = Field(default="", max_length=500)
+
+
 class IntegrityReportBody(SafeModel):
     role: str = Field(default="", max_length=64)
     exe_name: str = Field(default="", max_length=64)
@@ -3177,6 +3182,23 @@ def create_app(
             _client_ip(request),
         )
         _notify_approval(approval, "被驳回", note or "")
+        return {"ok": True}
+
+    @app.post("/api/approvals/settings")
+    def approval_settings(
+        body: ApprovalSettingsBody, admin: dict = Depends(require_master)
+    ):
+        """主控端与服务端共用：更新审批总开关与提示文案（实时生效）。"""
+        config.security["approval_enabled"] = bool(body.enabled)
+        config.security["approval_hint_text"] = str(body.hint_text or "")
+        config.save()
+        db.add_log(
+            "更新审批设置",
+            admin["username"],
+            "",
+            f"审批={'开启' if body.enabled else '关闭'}",
+            "",
+        )
         return {"ok": True}
 
     @app.post("/api/portal/transfer_request")

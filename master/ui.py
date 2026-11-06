@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QHeaderView,
     QLabel,
+    QMenu,
     QLineEdit,
     QTableWidget,
     QTableWidgetItem,
@@ -18,6 +19,7 @@ from core import security
 from core.api_client import ApiClient, ApiError
 from core.ai_page import AIAssistantPage
 from core.alert_center import AlertCenterPage
+from core.approvals_page import ApprovalCenterPage
 from core.config import APP_AUTHOR, APP_COPYRIGHT, APP_NAME, APP_VERSION, Config
 from core.pages import (
     AboutPage,
@@ -253,6 +255,8 @@ class AdminsPage(BasePage):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         for col in (0, 2, 3, 4, 5, 6, 7):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._ctx_menu)
         layout.addWidget(self.table, 1)
 
     def refresh(self) -> None:
@@ -289,6 +293,45 @@ class AdminsPage(BasePage):
             self.notify("请先选择一位管理员", "warning")
             return None
         return self.admins[row]
+
+    def _ctx_menu(self, pos) -> None:
+        if not self.table.indexAt(pos).isValid():
+            return
+        menu = QMenu(self)
+        menu.addAction("启用 / 禁用", self.toggle)
+        menu.addAction("重置密码", self.reset_password)
+        menu.addAction("设置邮箱 / 验证", self.manage_email)
+        menu.addSeparator()
+        menu.addAction("复制账号名", self._copy_username)
+        menu.addAction("删除账号", self.delete_account)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _copy_username(self) -> None:
+        target = self._selected()
+        if target:
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(str(target.get("username") or ""))
+            self.notify("账号名已复制", "success")
+
+    def delete_account(self) -> None:
+        """删除管理员（二次确认；系统至少保留一个主控）。"""
+        target = self._selected()
+        if not target:
+            return
+        if not confirm(
+            self,
+            "删除账号",
+            f"确定删除账号 {target.get('username')}？\n删除后立即无法登录（不可撤销；日常建议使用禁用）。",
+        ):
+            return
+        try:
+            self.client.delete_admin(int(target["id"]))
+        except ApiError as exc:
+            self.notify(str(exc), "error")
+            return
+        self.notify("账号已删除", "success")
+        self.refresh()
 
     def create(self) -> None:
         dialog = CreateAdminDialog(self.client, self.notify, self)
@@ -478,6 +521,7 @@ class MasterWindow(AppShell):
         self.generate = GeneratePage(client, self.notify)
         self.licenses = LicensesPage(client, self.notify)
         self.user_admin = UserAdminPage(client, self.notify)
+        self.approvals = ApprovalCenterPage(client, self.notify)
         self.batches = BatchesPage(client, self.notify)
         self.offline = OfflinePage(client, self.notify)
         self.admins = AdminsPage(client, self.notify)
@@ -492,6 +536,7 @@ class MasterWindow(AppShell):
         self.add_page("生成密钥", self.generate)
         self.add_page("密钥管理", self.licenses)
         self.add_page("用户管理", self.user_admin)
+        self.add_page("审批中心", self.approvals)
         self.add_page("批次管理", self.batches)
         self.add_page("离线激活", self.offline)
         self.add_page("管理员管理", self.admins)

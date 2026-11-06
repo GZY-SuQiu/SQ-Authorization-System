@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -749,6 +750,8 @@ class AlertCenterPage(BasePage):
         header_view.setSectionResizeMode(1, QHeaderView.Stretch)
         for column in (0, 2, 3, 4, 5, 6, 7):
             header_view.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.events_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.events_table.customContextMenuRequested.connect(self._ctx_menu_events)
         card.body.addWidget(self.events_table, 1)
         layout.addWidget(card)
 
@@ -1031,6 +1034,27 @@ class AlertCenterPage(BasePage):
             self.events_count_label.setText(f"显示 {loaded} / 共 {self.events_total} 条")
         else:
             self.events_count_label.setText(f"共 {loaded} 条")
+
+    def _ctx_menu_events(self, pos) -> None:
+        if not self.events_table.indexAt(pos).isValid():
+            return
+        menu = QMenu(self)
+        menu.addAction("确认事件", self.ack_event)
+        menu.addAction("标记已处理", self.resolve_event)
+        menu.addSeparator()
+        menu.addAction("复制事件行", self._copy_event_row)
+        menu.exec(self.events_table.viewport().mapToGlobal(pos))
+
+    def _copy_event_row(self) -> None:
+        row = self.events_table.currentRow()
+        if row < 0:
+            return
+        values = []
+        for col in range(self.events_table.columnCount()):
+            item = self.events_table.item(row, col)
+            values.append(item.text() if item is not None else "")
+        QApplication.clipboard().setText("\t".join(values))
+        self.notify("事件行已复制", "success")
 
     def _selected_event(self) -> dict | None:
         rows = selected_rows(self.events_table)
