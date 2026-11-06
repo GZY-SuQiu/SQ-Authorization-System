@@ -31,9 +31,24 @@ ISCC.exe /DAPP_DIR=installer_out\app installer\sq_license_setup.iss
 | 便携版 ZIP | 解压即用目录 | 老客户、U 盘分发 | 零安装、绿色 |
 | NSIS 安装器 | 单文件 setup.exe | 正式分发（推荐） | 中文向导、开始菜单/桌面快捷方式、卸载器（保留数据目录） |
 | Inno 安装器 | 单文件 setup.exe | NSIS 不可用时的备选 | 同上（可选中文需放语言文件） |
+| **7zSD 自解压安装器** | 单文件 Setup.exe | **跨平台制作（含无 Windows 环境）** | 双击安装（当前用户级）、快捷方式、卸载器 |
 
 **共同约定**：卸载不删除 `data/` 与 `server_config.json`（授权库与密钥防误删）；
 四个程序必须与 `release_manifest.json/.sig` 同目录（完整性自检）。
+
+## 一点五、方式 C：7zSD 自解压安装器（跨平台，无需 NSIS/Inno）
+
+```bash
+# 前置：7zSD 模块已随仓库提供 installer/tools/7zsd_All_x64.sfx
+python installer/make_sfx_installer.py \
+    --app installer_out/app \
+    --sfx installer/tools/7zsd_All_x64.sfx \
+    --output "installer_out/SQ授权系统-安装程序-1.0.0.exe"
+```
+
+特点：单文件双击安装（当前用户目录、免管理员）；自动创建开始菜单/桌面
+快捷方式与卸载器；**在任何平台（含 Linux/macOS）都能制作**。
+流程：双击 → 确认提示 → 解压 → 自动安装 → 完成。
 
 ## 三、校验与防护（make_package 内建）
 
