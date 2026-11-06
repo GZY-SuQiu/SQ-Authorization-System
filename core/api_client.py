@@ -663,6 +663,9 @@ class ApiClient:
             "GET", "/api/license/detail", params={"key_code": key_code}
         )
 
+    def metrics_trend(self, days: int = 30) -> dict:
+        return self._request("GET", "/api/metrics/trend", params={"days": int(days)})
+
     def public_key(self) -> dict:
         return self._request("GET", "/api/public_key")
 

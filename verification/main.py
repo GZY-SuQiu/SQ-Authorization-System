@@ -20,7 +20,7 @@ def main() -> int:
     config = get_config("verification")
     app = QApplication(sys.argv)
     integrity.run_startup_gate("verification")
-    theme.apply_theme(app)
+    theme.apply_theme(app, mode=config.client.get("theme_mode"))
 
     from verification.ui import VerifyWindow
 

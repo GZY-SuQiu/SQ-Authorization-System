@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import offline, security, theme
+from . import offline, qr, security, theme
 from .api_client import ApiClient, ApiError
 from .config import (
     APP_AUTHOR,
@@ -315,6 +315,77 @@ class ChangePasswordPage(BasePage):
         self.confirm_password.clear()
         self.changed.emit()
         self.notify("密码已修改，旧登录状态已失效", "success")
+
+
+class DashboardPage(BasePage):
+    """数据看板：生成 / 激活 / 到期的按日趋势（自绘图表，无第三方依赖）。"""
+
+    def __init__(self, client, notify):
+        super().__init__(client, notify)
+        from .charts import BarChart
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        header = QHBoxLayout()
+        header.addWidget(PageHeader("数据看板", "最近一段时间的运营趋势"))
+        header.addStretch(1)
+        self.range_box = QComboBox()
+        for label, days in (("近 7 天", 7), ("近 14 天", 14), ("近 30 天", 30), ("近 60 天", 60)):
+            self.range_box.addItem(label, days)
+        self.range_box.setCurrentIndex(2)
+        self.range_box.currentIndexChanged.connect(lambda _index: self.refresh())
+        header.addWidget(self.range_box)
+        header.addWidget(make_button("刷新", "ghost", self.refresh))
+        layout.addLayout(header)
+
+        self.summary = QLabel("加载中…")
+        self.summary.setObjectName("Muted")
+        layout.addWidget(self.summary)
+
+        trend_card = Card(padding=18)
+        trend_card.body.addWidget(PageHeader("新增 vs 激活", "按日统计"))
+        self.trend_chart = BarChart()
+        trend_card.body.addWidget(self.trend_chart)
+        layout.addWidget(trend_card)
+
+        expiry_card = Card(padding=18)
+        expiry_card.body.addWidget(PageHeader("到期分布", "按日到期数量（含未激活的固定到期卡）"))
+        self.expiry_chart = BarChart(show_legend=False)
+        expiry_card.body.addWidget(self.expiry_chart)
+        layout.addWidget(expiry_card)
+        layout.addStretch(1)
+
+    def on_show(self) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
+        days = int(self.range_box.currentData() or 30)
+        try:
+            data = self.client.metrics_trend(days)
+        except ApiError as exc:
+            self.notify(str(exc), "error")
+            return
+        series = data.get("series") or []
+        labels = [str(row.get("date", ""))[5:] for row in series]
+        self.trend_chart.set_data(
+            labels,
+            [
+                ("新增", [int(row.get("created") or 0) for row in series], theme.PRIMARY),
+                ("激活", [int(row.get("activated") or 0) for row in series], theme.SUCCESS),
+            ],
+        )
+        self.expiry_chart.set_data(
+            labels,
+            [("到期", [int(row.get("expiring") or 0) for row in series], theme.WARNING)],
+        )
+        totals = data.get("totals") or {}
+        self.summary.setText(
+            f"近 {days} 天：新增 {int(totals.get('created') or 0)} · "
+            f"激活 {int(totals.get('activated') or 0)} · "
+            f"到期 {int(totals.get('expiring') or 0)}"
+        )
 
 
 class OverviewPage(BasePage):
@@ -690,10 +761,15 @@ class DetailDialog(QDialog):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
         layout.addWidget(self.table, 1)
         actions = QHBoxLayout()
+        actions.addWidget(make_button("二维码", "default", self.show_qr))
         actions.addStretch(1)
         actions.addWidget(make_button("一键换绑", "default", self.rebind))
         layout.addLayout(actions)
         self.load()
+
+    def show_qr(self) -> None:
+        """展示卡密二维码（便于分发/扫码录入）。"""
+        qr.show_qr_dialog(self, "卡密二维码", self.key_code)
 
     def rebind(self) -> None:
         """一键换绑：解冻 + 解绑全部设备 + 引导文案。"""
@@ -1983,6 +2059,7 @@ class OfflinePage(BasePage):
         head = QHBoxLayout()
         head.addWidget(PageHeader("离线激活码", "发送给设备方导入即可完成激活"))
         head.addStretch(1)
+        head.addWidget(make_button("二维码", "default", self.show_code_qr))
         head.addWidget(make_button("保存激活码", "default", self.save_code))
         head.addWidget(make_button("复制激活码", "ghost", self.copy_code))
         result_card.body.addLayout(head)
@@ -2085,6 +2162,14 @@ class OfflinePage(BasePage):
             return
         QApplication.clipboard().setText(code)
         self.notify("已复制到剪贴板", "success")
+
+    def show_code_qr(self) -> None:
+        """展示离线激活码二维码（内容长，扫码导入更省事）。"""
+        code = offline.clean_code(self.output.toPlainText())
+        if not code:
+            self.notify("暂无可展示的激活码", "warning")
+            return
+        qr.show_qr_dialog(self, "离线激活码二维码", code)
 
     def save_code(self) -> None:
         code = offline.clean_code(self.output.toPlainText())

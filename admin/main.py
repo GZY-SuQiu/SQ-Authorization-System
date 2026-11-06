@@ -21,7 +21,7 @@ def main() -> int:
     config = get_config("admin")
     app = QApplication(sys.argv)
     integrity.run_startup_gate("admin")
-    theme.apply_theme(app)
+    theme.apply_theme(app, mode=config.client.get("theme_mode"))
 
     from admin.ui import AdminWindow
 

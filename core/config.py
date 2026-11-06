@@ -62,6 +62,8 @@ CLIENT_DEFAULT_CONFIG = {
     # AI chat runs a whole tool loop on the server, so it needs its own, much
     # longer budget than ordinary REST calls.
     "ai_timeout": 600,
+    # 界面主题：light / dark（下次启动生效；SQ_THEME 环境变量可临时覆盖）。
+    "theme_mode": "light",
     "heartbeat_enabled": True,
     "heartbeat_interval": 20,
     "heartbeat_jitter": 0.35,

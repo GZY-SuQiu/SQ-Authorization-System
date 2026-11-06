@@ -489,7 +489,79 @@ QStatusBar::item {{ border: none; }}
 """
 
 
-def apply_theme(app) -> None:
+# --------------------------------------------------------------------------- #
+# 深色主题（B5）：对浅色 QSS 做系统化颜色映射生成深色版本。
+# 规则：长键优先 + 十六进制边界保护；"白字"（color/selection-color 后的
+# #FFFFFF）保留白色，#FFFFFF 的其余用法（底色/面）映射为深色面。
+# --------------------------------------------------------------------------- #
+_DARK_COLOR_MAP = {
+    # 底 / 面 / 边框
+    "#F5F7FB": "#151517",
+    "#FBFCFE": "#17171A",
+    "#F7F9FC": "#19191C",
+    "#F4F6FA": "#1B1B1E",
+    "#F2F5FA": "#1B1B1E",
+    "#F0F3F8": "#1D1D20",
+    "#EDF1F9": "#1E1E22",
+    "#E8EEFA": "#23232A",
+    "#EEF4FF": "#202639",
+    "#E3E8F0": "#2E2E34",
+    "#D7E2FF": "#26304A",
+    "#D5DCE8": "#38383E",
+    "#D2DAE8": "#38383E",
+    "#BFC9DA": "#45454C",
+    "#EFEFEF": "#2C2C2E",
+    "#FFFFFF": "#1B1B1C",  # 仅用于非白字场景（见 build_dark_qss 说明）
+    # 文字
+    "#1D2330": "#F2F2F5",
+    "#5B6478": "#C6C6CE",
+    "#7C8799": "#9EA0AC",
+    "#9AA3B2": "#82848F",
+    "#AAB3C2": "#6E7078",
+    # 状态色：浅底 -> 深底；纯色 -> 提亮
+    "#FEF7F7": "#2A1B1A",
+    "#FEF0EF": "#2A1B1A",
+    "#FCE3E1": "#3A2321",
+    "#F6DCDA": "#4A2C29",
+    "#F1B8B3": "#8A4A46",
+    "#ED9B94": "#A05A54",
+    "#E7B4B0": "#8A4A46",
+    "#D92D20": "#FF6B5E",
+    "#FFF6E6": "#2A2410",
+    "#B76E00": "#E0A63C",
+    "#EAF8F0": "#142A1E",
+    "#168A4A": "#3FC97F",
+    "#F3EFFF": "#241C38",
+    "#6941C6": "#B49CF5",
+    # 品牌蓝系（#2F6BFF / #1E5BEF / #1749C7 / #A9C1FF）保持不变
+}
+
+
+def build_dark_qss() -> str:
+    """由浅色 QSS 生成深色 QSS（颜色映射 + 白字保护）。"""
+    import re as _re
+
+    source = APP_QSS
+    text = source
+    for light in sorted(
+        (key for key in _DARK_COLOR_MAP if key != "#FFFFFF"),
+        key=len,
+        reverse=True,
+    ):
+        pattern = _re.compile(_re.escape(light) + r"(?![0-9A-Fa-f])")
+        text = pattern.sub(_DARK_COLOR_MAP[light], text)
+
+    def _white_sub(match):
+        prefix = source[max(0, match.start() - 32):match.start()]
+        if _re.search(r"color\s*:\s*$", prefix):
+            return match.group(0)  # 白字保留
+        return _DARK_COLOR_MAP["#FFFFFF"]
+
+    text = _re.sub(r"#FFFFFF(?![0-9A-Fa-f])", _white_sub, text)
+    return text
+
+
+def apply_theme(app, mode: str | None = None) -> None:
     import os
     import sys
 
@@ -497,9 +569,12 @@ def apply_theme(app) -> None:
     from PySide6.QtGui import QColor, QFont, QIcon, QPalette
     from PySide6.QtWidgets import QStyleFactory
 
+    resolved = str(mode or os.environ.get("SQ_THEME", "") or "light").strip().lower()
+    dark = resolved in ("dark", "深色", "夜间")
+
     # Windows 深色模式下，windows11 原生风格会用系统主题绘制 QSS 未覆盖的
     # 子控件（滚动视口、滚动条角落、弹出框边缘），于是白界面里冒出黑块。
-    # 统一换用 Fusion，配色完全由这份 QSS + 浅色调色板决定。
+    # 统一换用 Fusion，配色完全由这份 QSS + 主题调色板决定。
     if sys.platform == "win32" and not os.environ.get("SQ_KEEP_NATIVE_STYLE"):
         fusion = QStyleFactory.create("Fusion")
         if fusion is not None:
@@ -511,8 +586,10 @@ def apply_theme(app) -> None:
     font.setFamilies(FONT_FAMILIES)
     font.setPointSize(9)
     app.setFont(font)
-    app.setStyleSheet(APP_QSS)
-    app.setPalette(_light_palette(QColor, QPalette))
+    app.setStyleSheet(build_dark_qss() if dark else APP_QSS)
+    app.setPalette(
+        _dark_palette(QColor, QPalette) if dark else _light_palette(QColor, QPalette)
+    )
 
     # Windows 深色模式会给原生窗口画深色标题栏/边框；逐窗口强制浅色，
     # 避免"白界面 + 黑边"的割裂感（失败时静默忽略）。
@@ -523,7 +600,7 @@ def apply_theme(app) -> None:
             # Qt→Python 回调报 SystemError。
             try:
                 if event.type() == QEvent.Show and hasattr(obj, "winId"):
-                    _set_light_titlebar(obj)
+                    _set_titlebar(obj, dark=dark)
             except Exception:
                 pass
             return False
@@ -559,8 +636,33 @@ def _light_palette(qcolor, qpalette):
     return palette
 
 
+def _dark_palette(qcolor, qpalette):
+    """Explicit dark palette so unstyled native widgets match the dark QSS."""
+    palette = qpalette()
+    palette.setColor(qpalette.Window, qcolor("#151517"))
+    palette.setColor(qpalette.WindowText, qcolor("#F2F2F5"))
+    palette.setColor(qpalette.Base, qcolor("#1B1B1C"))
+    palette.setColor(qpalette.AlternateBase, qcolor("#232326"))
+    palette.setColor(qpalette.Text, qcolor("#F2F2F5"))
+    palette.setColor(qpalette.Button, qcolor("#232326"))
+    palette.setColor(qpalette.ButtonText, qcolor("#F2F2F5"))
+    palette.setColor(qpalette.Highlight, qcolor(PRIMARY))
+    palette.setColor(qpalette.HighlightedText, qcolor("#FFFFFF"))
+    palette.setColor(qpalette.ToolTipBase, qcolor("#232326"))
+    palette.setColor(qpalette.ToolTipText, qcolor("#F2F2F5"))
+    palette.setColor(qpalette.PlaceholderText, qcolor("#6E7078"))
+    palette.setColor(qpalette.Disabled, qpalette.Text, qcolor("#6E7078"))
+    palette.setColor(qpalette.Disabled, qpalette.ButtonText, qcolor("#6E7078"))
+    return palette
+
+
 def _set_light_titlebar(widget) -> None:
     """Ask DWM to draw a light caption/border for a top-level window."""
+    _set_titlebar(widget, dark=False)
+
+
+def _set_titlebar(widget, dark: bool = False) -> None:
+    """Ask DWM to draw a caption/border matching the chosen theme."""
     import sys
 
     if sys.platform != "win32":
@@ -572,7 +674,7 @@ def _set_light_titlebar(widget) -> None:
         hwnd = int(widget.winId())
         if not hwnd:
             return
-        value = ctypes.c_int(0)  # 0 = 浅色（关闭 immersive dark mode）
+        value = ctypes.c_int(1 if dark else 0)  # 1 = 深色标题栏
         for attribute in (20, 19):  # 新版/旧版 DWMWA_USE_IMMERSIVE_DARK_MODE
             result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 wintypes.HWND(hwnd),

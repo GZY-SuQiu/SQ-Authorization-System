@@ -21,7 +21,7 @@ def main() -> int:
     config = get_config("master")
     app = QApplication(sys.argv)
     integrity.run_startup_gate("master")
-    theme.apply_theme(app)
+    theme.apply_theme(app, mode=config.client.get("theme_mode"))
 
     from master.ui import MasterWindow
 

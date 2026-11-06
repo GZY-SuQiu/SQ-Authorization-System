@@ -3751,6 +3751,13 @@ def create_app(
     ):
         return db.alert_metrics(window_seconds)
 
+    @app.get("/api/metrics/trend")
+    def metrics_trend(
+        days: int = Query(default=30, ge=7, le=90),
+        admin: dict = Depends(current_admin),
+    ):
+        return db.license_trend(days)
+
     # ------------------------------------------------------------------
     # Data retention / maintenance (P2-13)
     # ------------------------------------------------------------------

@@ -223,7 +223,7 @@ def main() -> int:
     from server.ui import ServerWindow
 
     app = QApplication(sys.argv)
-    theme.apply_theme(app)
+    theme.apply_theme(app, mode=config.client.get("theme_mode"))
     # The one-time password is handed to the window so it can be shown in a
     # modal dialog. A toast would be replaced by the "service started"
     # notice about a second later, which is how the old build lost it.

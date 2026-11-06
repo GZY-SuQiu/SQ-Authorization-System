@@ -3683,3 +3683,52 @@ class Database:
             (security.normalize_key(key_code), max(1, min(int(limit or 50), 500))),
         )
         return [dict(row) for row in rows]
+
+    def license_trend(self, days: int = 30) -> dict:
+        """最近 N 天的运营趋势（按日）：新增卡密 / 激活设备 / 到期数量。
+
+        数据源：licenses.created_at、activations.activated_at、licenses.expires_at。
+        返回 ``{"days", "series": [{date, created, activated, expiring}...], "totals"}``。
+        """
+        days = max(1, min(int(days or 30), 90))
+        today = datetime.now().date()
+        start = today - timedelta(days=days - 1)
+        start_str = start.strftime("%Y-%m-%d") + " 00:00:00"
+
+        def daily(sql: str) -> dict:
+            rows = self._fetchall(sql, (start_str,))
+            return {str(row["d"]): int(row["n"]) for row in rows}
+
+        created = daily(
+            "SELECT substr(created_at, 1, 10) AS d, COUNT(*) AS n FROM licenses"
+            " WHERE created_at >= ? GROUP BY d"
+        )
+        activated = daily(
+            "SELECT substr(activated_at, 1, 10) AS d, COUNT(*) AS n FROM activations"
+            " WHERE activated_at >= ? GROUP BY d"
+        )
+        expiring = daily(
+            "SELECT substr(expires_at, 1, 10) AS d, COUNT(*) AS n FROM licenses"
+            " WHERE expires_at IS NOT NULL AND expires_at <> '' AND expires_at >= ?"
+            " GROUP BY d"
+        )
+        series = []
+        for index in range(days):
+            day = (start + timedelta(days=index)).strftime("%Y-%m-%d")
+            series.append(
+                {
+                    "date": day,
+                    "created": created.get(day, 0),
+                    "activated": activated.get(day, 0),
+                    "expiring": expiring.get(day, 0),
+                }
+            )
+        return {
+            "days": days,
+            "series": series,
+            "totals": {
+                "created": sum(created.values()),
+                "activated": sum(activated.values()),
+                "expiring": sum(expiring.values()),
+            },
+        }

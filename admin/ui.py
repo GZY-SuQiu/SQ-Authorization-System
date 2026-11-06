@@ -6,6 +6,7 @@ from core.pages import (
     AboutPage,
     BatchesPage,
     ChangePasswordPage,
+    DashboardPage,
     GeneratePage,
     LicensesPage,
     LogsPage,
@@ -27,6 +28,7 @@ class AdminWindow(AppShell):
         self.notify = self.toast.show_message
 
         self.overview = OverviewPage(client, self.notify)
+        self.dashboard = DashboardPage(client, self.notify)
         self.change_password = ChangePasswordPage(client, self.notify)
         self.ai = AIAssistantPage(client, self.notify)
         self.alerts = AlertCenterPage(client, self.notify)
@@ -39,6 +41,7 @@ class AdminWindow(AppShell):
         self.about = AboutPage(client, self.notify)
 
         self.add_page("系统概览", self.overview)
+        self.add_page("数据看板", self.dashboard)
         self.add_page("AI 助手", self.ai)
         self.add_page("告警中心", self.alerts)
         self.add_page("生成密钥", self.generate)
