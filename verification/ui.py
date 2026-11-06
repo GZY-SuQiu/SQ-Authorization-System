@@ -1,6 +1,7 @@
 import base64
 import os
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QIODevice, QSize, Qt, QTimer
 from PySide6.QtGui import QImage, QImageReader, QPainter, QPainterPath, QPixmap
@@ -46,10 +47,12 @@ RESULT_BADGE = {
 
 # Offline validation has to trust the local clock, so winding that clock
 # back would otherwise resurrect an expired license. The newest check
-# timestamp is therefore remembered and a large step backwards is
-# treated as tampering. The tolerance absorbs DST and NTP corrections.
-CLOCK_SKEW_TOLERANCE_SECONDS = 6 * 3600
+# timestamp is remembered in two places (config + sidecar file), HMAC-sealed
+# via core.offline, and a large step backwards is treated as tampering.
+# 判定本体已收口至 core.offline.evaluate_activation_payload（Nuitka 编译域）。
 LAST_SEEN_FIELD = "offline_last_seen_ts"
+LAST_SEEN_SIG_FIELD = "offline_last_seen_sig"
+LAST_SEEN_BACKUP_FILE = ".sq_lastseen"
 
 # Portal profile avatars: the server only accepts these image types and caps
 # the decoded payload, so the file picker mirrors both rules up front.
@@ -1849,22 +1852,42 @@ class VerifyWindow(QMainWindow):
             return None
         return payload
 
-    def _offline_left(self, payload: dict) -> int | None:
-        exp = payload.get("exp")
-        return security.seconds_left(exp) if exp else None
+    def _watermark_entries(self) -> list:
+        """读取两个存储位的 watermark（config + 旁路文件）；被编辑的条目由
+        core.offline.effective_last_seen 在验签阶段自动丢弃。"""
+        entries = []
+        try:
+            entries.append((
+                int(self.config.client.get(LAST_SEEN_FIELD) or 0),
+                str(self.config.client.get(LAST_SEEN_SIG_FIELD) or ""),
+            ))
+        except (TypeError, ValueError):
+            pass
+        try:
+            backup_path = Path(self.config.path).parent / LAST_SEEN_BACKUP_FILE
+            raw = backup_path.read_text(encoding="ascii").strip()
+            ts_text, _, sig_text = raw.partition(":")
+            entries.append((int(ts_text or 0), sig_text))
+        except (OSError, ValueError):
+            pass
+        return entries
 
-    def _clock_rolled_back(self) -> bool:
-        remembered = int(self.config.client.get(LAST_SEEN_FIELD) or 0)
-        if not remembered:
-            return False
-        return time.time() < remembered - CLOCK_SKEW_TOLERANCE_SECONDS
+    def _last_seen(self) -> int:
+        return offline.effective_last_seen(self.machine_code, self._watermark_entries())
 
     def _touch_last_seen(self) -> None:
         now = int(time.time())
-        remembered = int(self.config.client.get(LAST_SEEN_FIELD) or 0)
-        if now > remembered:
-            self.config.client[LAST_SEEN_FIELD] = now
-            self.config.save()
+        if now <= self._last_seen():
+            return
+        signature = offline.seal_watermark(self.machine_code, now)
+        self.config.client[LAST_SEEN_FIELD] = now
+        self.config.client[LAST_SEEN_SIG_FIELD] = signature
+        self.config.save()
+        try:
+            backup_path = Path(self.config.path).parent / LAST_SEEN_BACKUP_FILE
+            backup_path.write_text(f"{now}:{signature}", encoding="ascii")
+        except OSError:
+            pass
 
     def import_offline(self) -> None:
         code = offline.clean_code(self.offline_input.toPlainText())
@@ -1876,34 +1899,19 @@ class VerifyWindow(QMainWindow):
             self._set_result("error", "无法导入", "缺少公钥，请先联网连接服务器获取公钥后再导入。")
             self.toast.show_message("缺少公钥，请先连接服务器", "error")
             return
-        # A rolled-back clock must not be allowed to make an already-expired
-        # activation code look importable.
-        if self._clock_rolled_back():
-            self._set_result(
-                "error", "系统时间异常",
-                "检测到本机时间被回拨，已拒绝导入。请校正系统时间后重试。",
-            )
-            self.toast.show_message("系统时间异常，已拒绝导入", "error")
-            return
         payload = offline.parse_activation_code(code, pub)
         if not payload:
             self._set_result("error", "激活码无效", "签名校验失败，激活码可能被篡改或不属于本系统。")
             self.toast.show_message("激活码无效", "error")
             return
-        mc = (payload.get("mc") or "").upper()
-        if mc and mc != self.machine_code.upper():
-            self._set_result(
-                "error", "设备不匹配",
-                f"该激活码绑定机器码 {mc}，与本机 {self.machine_code} 不一致。",
-            )
-            self.toast.show_message("该激活码不属于本机", "error")
-            return
-        if payload.get("exp") and security.is_expired(payload.get("exp")):
-            self._set_result(
-                "error", "离线激活码已过期",
-                f"到期时间：{payload.get('exp')}",
-            )
-            self.toast.show_message("离线激活码已过期", "error")
+        # 三重判定（回拨/机器码/到期）收口在 core.offline —— 随离线协议模块
+        # 一同进入 Nuitka 编译域，UI 层只负责展示。
+        verdict = offline.evaluate_activation_payload(
+            payload, self.machine_code, last_seen=self._last_seen()
+        )
+        if not verdict.get("ok"):
+            self._set_result("error", "激活码校验未通过", verdict.get("message", ""))
+            self.toast.show_message("激活码校验未通过", "error")
             return
         self.config.client["offline_activation"] = code
         self.config.client["offline_key"] = payload.get("key", "")
@@ -1929,19 +1937,14 @@ class VerifyWindow(QMainWindow):
             self._set_result("warning", "无离线授权", "尚未导入有效的离线激活码，或公钥缺失。")
             self.toast.show_message("暂无离线授权", "warning")
             return
-        if self._clock_rolled_back():
-            self._set_result(
-                "error", "系统时间异常",
-                "检测到本机时间被回拨，离线校验已拒绝。请校正系统时间后重试。",
-            )
-            self.toast.show_message("系统时间异常，已拒绝离线校验", "error")
+        verdict = offline.evaluate_activation_payload(
+            payload, self.machine_code, last_seen=self._last_seen()
+        )
+        if not verdict.get("ok"):
+            self._set_result("error", "校验未通过", verdict.get("message", ""))
+            self.toast.show_message("离线校验未通过", "error")
             return
-        left = self._offline_left(payload)
         exp = payload.get("exp")
-        if left is not None and left <= 0:
-            self._set_result("error", "离线授权已过期", f"到期时间：{exp}")
-            self.toast.show_message("离线授权已过期", "error")
-            return
         remain = security.humanize_remaining(exp) if exp else "永久"
         self._set_result(
             "success", "离线授权有效",
@@ -1954,19 +1957,14 @@ class VerifyWindow(QMainWindow):
         payload = self._offline_payload()
         if not payload:
             return False
-        if self._clock_rolled_back():
-            self._set_result(
-                "error", "系统时间异常",
-                "检测到本机时间被回拨，离线校验已拒绝。请校正系统时间后重试。",
-            )
-            self.toast.show_message("系统时间异常，已拒绝离线校验", "error")
+        verdict = offline.evaluate_activation_payload(
+            payload, self.machine_code, last_seen=self._last_seen()
+        )
+        if not verdict.get("ok"):
+            self._set_result("error", "校验未通过", verdict.get("message", ""))
+            self.toast.show_message("离线校验未通过", "error")
             return True
-        left = self._offline_left(payload)
         exp = payload.get("exp")
-        if left is not None and left <= 0:
-            self._set_result("error", "授权已过期", f"离线授权已验证且已过期。到期时间：{exp}")
-            self.toast.show_message("离线授权已过期", "error")
-            return True
         remain = security.humanize_remaining(exp) if exp else "永久"
         self._set_result(
             "success", "离线授权有效",

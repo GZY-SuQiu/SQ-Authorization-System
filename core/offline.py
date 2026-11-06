@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import json
 import secrets
 
@@ -10,7 +11,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from .security import TIME_FORMAT, _b64d, _b64e, now_str, now_ts, parse_expiry
+from .security import (
+    TIME_FORMAT,
+    _b64d,
+    _b64e,
+    is_expired,
+    now_str,
+    now_ts,
+    parse_expiry,
+)
 
 _REQUEST_PREFIX = "LICREQ1."
 _ACTIVATION_PREFIX = "LICACT1."
@@ -227,6 +236,97 @@ def parse_activation_code(code: str, public_hex: str) -> dict | None:
         else []
     )
     return payload
+
+
+# --------------------------------------------------------------------------- #
+# 离线激活码最终判定（判定收口层）
+# --------------------------------------------------------------------------- #
+# 设计：验证端 UI 层不再自行实现"回拨/机器码/过期"判定，统一调用本模块的
+# evaluate_activation_payload()。本模块随 Nuitka 加固一并编译为原生扩展后，
+# 三条判定天然进入编译域（patch Python 层无法改变判定结果）。
+CLOCK_SKEW_TOLERANCE_SECONDS = 6 * 3600
+# 编译后该盐藏于原生代码；源码分发场景下配合加固方案使用。
+_WATERMARK_SALT = "sq-offline-watermark-v1:9f2c7b31e5"
+
+
+def seal_watermark(machine_code: str, ts: int) -> str:
+    """为"最近一次校验时间"生成 HMAC 防伪标记。"""
+    material = f"{str(machine_code or '').strip().upper()}|{int(ts)}"
+    return hmac.new(
+        _WATERMARK_SALT.encode("utf-8"), material.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def verify_watermark(machine_code: str, ts: int, signature: str) -> bool:
+    """校验防伪标记；失败视为该记录被编辑（弃用）。"""
+    if not signature or not ts:
+        return False
+    try:
+        expected = seal_watermark(machine_code, int(ts))
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(expected, str(signature).strip())
+
+
+def effective_last_seen(machine_code: str, entries) -> int:
+    """多点 watermark 取最大值；签名无效的条目忽略（视为被编辑）。"""
+    best = 0
+    for entry in entries or []:
+        try:
+            ts_value = int(entry[0] or 0)
+            sig_value = str(entry[1] or "")
+        except (IndexError, TypeError, ValueError):
+            continue
+        if ts_value > 0 and verify_watermark(machine_code, ts_value, sig_value):
+            best = max(best, ts_value)
+    return best
+
+
+def check_rolled_back(machine_code: str, last_seen: int, now: float) -> bool:
+    """是否检测到时钟回拨（当前时间显著早于已见 watermark）。"""
+    return bool(last_seen) and float(now) < int(last_seen) - CLOCK_SKEW_TOLERANCE_SECONDS
+
+
+def evaluate_activation_payload(
+    payload: dict,
+    machine_code: str,
+    *,
+    last_seen: int = 0,
+    now: float | None = None,
+) -> dict:
+    """离线激活码的最终判定（回拨 / 机器码绑定 / 到期）。
+
+    调用前应先完成签名校验（parse_activation_code）。返回
+    ``{"ok": bool, "code": str, "message": str}``，code 取值：
+    ``clock_rolled_back`` / ``machine_mismatch`` / ``expired`` / ``ok``。
+    """
+    import time as _time
+
+    current = float(now if now is not None else _time.time())
+    if check_rolled_back(machine_code, last_seen, current):
+        return {
+            "ok": False,
+            "code": "clock_rolled_back",
+            "message": "检测到本机时间被回拨，已拒绝。请校正系统时间后重试。",
+        }
+    if not isinstance(payload, dict):
+        return {"ok": False, "code": "invalid", "message": "激活码无效"}
+    bound = str(payload.get("mc") or "").strip().upper()
+    target = str(machine_code or "").strip().upper()
+    if bound and target and bound != target:
+        return {
+            "ok": False,
+            "code": "machine_mismatch",
+            "message": f"该激活码绑定机器码 {bound}，与本机 {target} 不一致。",
+        }
+    exp = payload.get("exp")
+    if exp and is_expired(exp):
+        return {
+            "ok": False,
+            "code": "expired",
+            "message": f"激活码已过期（到期时间：{exp}）。",
+        }
+    return {"ok": True, "code": "ok", "message": "校验通过"}
 
 
 def build_activation_payload(

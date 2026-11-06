@@ -54,6 +54,14 @@ python tools/build_nuitka.py all
 | PyInstaller 收集编译模块 | ✅ `_internal/core/{offline,security,integrity,api_client}.so` |
 | 冻结产物完整性门禁 | ✅ fail-closed 行为不变（缺清单拒绝启动） |
 
+## 四点五、判定收口（B2 批次）
+
+离线激活的"回拨 / 机器码 / 到期"三重判定已从验证端 UI 层收口至
+`core/offline.evaluate_activation_payload()`（连同 watermark 的 HMAC 生成/校验
+`seal_watermark / verify_watermark / effective_last_seen`）——该模块在编译清单内，
+因此**这些判定在加固构建后自然位于原生代码中**，patch Python 层无法改变结果。
+UI 层只负责展示判定消息。
+
 ## 五、发布注意
 
 1. 加固产物与普通产物**发布流程完全相同**（清单签名、attest 白名单、卫生检查全部照旧）。
