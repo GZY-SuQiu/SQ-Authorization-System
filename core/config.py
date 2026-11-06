@@ -184,6 +184,14 @@ SERVER_DEFAULT_CONFIG = {
         # 浮动席位（max_concurrent>0）的在线租约窗口：心跳/校验在该窗口内
         # 视为占座；停跳超过窗口自动释放席位。
         "seat_lease_seconds": 90,
+        # 审批总开关：开启后，用户注册 / 主控端创建管理员 / 卡密转赠
+        # 全部走审批（由服务端与主控端的"审批中心"批准）；关闭则直接放行。
+        "approval_enabled": True,
+        # 审批提示文案（展示给提交申请的用户；可在服务端设置中自定义）。
+        "approval_hint_text": "为避免服务器繁忙，需进行管理员审批，请耐心等待审批通过。",
+        # 卡密强制挂钩账号：开启后，激活必须携带"已绑定该卡密"的账号身份；
+        # SDK / 第三方宿主（请求头 X-Client-Kind: sdk）豁免。
+        "binding_required": True,
         # P2-13 数据保留：按天清理历史数据，0 表示该类数据永久保留。
         "retention_audit_days": 180,
         "retention_events_days": 365,

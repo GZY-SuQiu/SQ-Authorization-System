@@ -20,3 +20,14 @@ def _reset_server_rate_limiters():
         # 收集阶段（如无 fastapi 环境）不阻断测试。
         pass
     yield
+
+# 测试进程级的功能默认放宽：老功能测试按"无新门禁"语义运行
+# （审批体系与卡密-账号强挂钩由 tests/test_c1.py 显式开启后专项覆盖；
+#   产品默认值不受影响。）
+try:
+    from core import config as _core_config
+
+    _core_config.SERVER_DEFAULT_CONFIG["security"]["binding_required"] = False
+    _core_config.SERVER_DEFAULT_CONFIG["security"]["approval_enabled"] = False
+except Exception:
+    pass

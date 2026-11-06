@@ -64,6 +64,17 @@ WORKER_INTERVAL_SECONDS = 5.0
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
 
 DEFAULT_TEMPLATES: dict[str, dict] = {
+    "approval_notice": {
+        "subject": "【密钥授权系统】审批结果通知",
+        "body": (
+            "您好：\n"
+            "\n"
+            "您提交的「{{kind_text}}」已{{result_text}}。\n"
+            "{{detail_text}}"
+            "\n"
+            "密钥授权系统"
+        ),
+    },
     "verify_email": {
         "subject": "【密钥授权系统】邮箱验证码",
         "body": (

@@ -325,7 +325,7 @@ class ProcessDueTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
-    def test_default_templates_cover_the_seven_codes(self):
+    def test_default_templates_cover_all_codes(self):
         self.assertEqual(
             set(DEFAULT_TEMPLATES),
             {
@@ -336,6 +336,7 @@ class TemplateTests(unittest.TestCase):
                 "renewal_request",
                 "alert_rule",
                 "test_email",
+                "approval_notice",
             },
         )
         for code, template in DEFAULT_TEMPLATES.items():

@@ -558,11 +558,17 @@ class AdminCreateBody(SafeModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
     role: str = Field(default="admin", max_length=16)
+    # 待审批模式：创建后默认禁用，主控在审批中心批准后启用。
+    needs_approval: bool = Field(default=False)
 
 
 class AdminStatusBody(SafeModel):
     admin_id: int = Field(ge=1)
     status: str = Field(max_length=16)
+
+
+class AdminIdBody(SafeModel):
+    admin_id: int = Field(ge=1)
 
 
 class AdminPasswordBody(SafeModel):
@@ -581,6 +587,8 @@ class ActivateBody(SafeModel):
     device_name: str = Field(default="", max_length=128)
     # 分量指纹（可选）：设备满员时用于"同机硬件变更"容错置换。
     machine_components: dict | None = Field(default=None)
+    # 账号凭据（卡密-账号强挂钩模式必填；SDK 豁免见 binding_required）。
+    portal_token: str = Field(default="", max_length=4096)
 
 
 class OfflineCodeBody(SafeModel):
@@ -637,6 +645,15 @@ class AttestBody(SafeModel):
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
             raise ValueError("manifest_sha256 必须是空串或 64 位十六进制字符串")
         return digest
+
+
+class ApprovalReviewBody(SafeModel):
+    note: str = Field(default="", max_length=500)
+
+
+class PortalTransferBody(SafeModel):
+    key_code: str = Field(min_length=1, max_length=128)
+    target_email: str = Field(min_length=3, max_length=254)
 
 
 class IntegrityReportBody(SafeModel):
@@ -2433,6 +2450,27 @@ def create_app(
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
         admin_id = db.create_admin(username, body.password, body.role)
+        review_required = bool(config.security.get("approval_enabled", True)) or bool(
+            getattr(body, "needs_approval", False)
+        )
+        if review_required:
+            # 审批模式（主控端创建即进入；服务端直连创建不受限）：先禁用，
+            # 待服务端/主控端在审批中心批准后启用。
+            db.set_admin_status(admin_id, "disabled")
+            db.create_approval(
+                "admin_register",
+                admin["username"],
+                username,
+                {"admin_id": admin_id, "username": username, "role": body.role},
+            )
+            db.add_log(
+                "创建管理员",
+                admin["username"],
+                username,
+                f"角色 {body.role} · 待审批",
+                "",
+            )
+            return {"ok": True, "id": admin_id, "pending_approval": True}
         db.add_log(
             "创建管理员",
             admin["username"],
@@ -2460,6 +2498,24 @@ def create_app(
             target["username"],
             body.status,
             "",
+        )
+        return {"ok": True}
+
+    @app.post("/api/admin/delete")
+    def admin_delete(
+        body: AdminIdBody, request: Request, admin: dict = Depends(require_master)
+    ):
+        target = db.get_admin_by_id(body.admin_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="管理员不存在")
+        if int(target["id"]) == int(admin["id"]):
+            raise HTTPException(status_code=400, detail="不能删除自己")
+        if not db.delete_admin(target["id"]):
+            raise HTTPException(
+                status_code=400, detail="删除失败：系统需至少保留一个主控账号"
+            )
+        db.add_log(
+            "删除管理员", admin["username"], target["username"], "", _client_ip(request)
         )
         return {"ok": True}
 
@@ -2547,6 +2603,24 @@ def create_app(
         db.set_portal_account_status(target["id"], state)
         db.add_log(
             "修改门户账号状态", admin["username"], target["email"], state, ""
+        )
+        return {"ok": True}
+
+    @app.post("/api/admin/portal_accounts/{account_id}/delete")
+    def portal_account_delete(
+        account_id: int, request: Request, admin: dict = Depends(require_master)
+    ):
+        account = db.get_portal_account_by_id(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if not db.delete_portal_account(account_id):
+            raise HTTPException(status_code=400, detail="删除失败")
+        db.add_log(
+            "删除门户账号",
+            admin["username"],
+            str(account.get("email") or account_id),
+            "绑定与设备记录已释放",
+            _client_ip(request),
         )
         return {"ok": True}
 
@@ -2688,11 +2762,29 @@ def create_app(
             db.add_log("门户注册失败", email, "", "验证码无效", ip)
             raise HTTPException(status_code=400, detail="验证码错误或已过期")
         password_hash, salt = security.hash_password(body.password)
+        review_required = bool(config.security.get("approval_enabled", True))
         try:
-            account_id = db.create_portal_account(email, password_hash, salt)
+            account_id = db.create_portal_account(
+                email,
+                password_hash,
+                salt,
+                status="pending" if review_required else "active",
+            )
         except sqlite3.IntegrityError:
             return {"ok": False, "code": "already_registered"}
         db.mark_portal_email_verified(account_id)
+        if review_required:
+            db.create_approval("user_register", email, "", {"email": email})
+            db.add_log("门户注册", email, "", "待审批", ip)
+            return {
+                "ok": True,
+                "pending_approval": True,
+                "email": email,
+                "message": str(
+                    config.security.get("approval_hint_text")
+                    or "您的注册申请已提交，请等待管理员审批。"
+                ),
+            }
         token = security.create_portal_token(
             {"uid": account_id, "ver": 0}, secret, PORTAL_TOKEN_TTL_SECONDS
         )
@@ -2721,6 +2813,12 @@ def create_app(
         # Always run the full PBKDF2 routine, even for unknown addresses, so
         # response time does not reveal whether the account exists.
         matched = _constant_time_login(body.password, account)
+        if account and matched and str(account.get("status")) == "pending":
+            return {
+                "ok": False,
+                "code": "pending_approval",
+                "message": "账号正在审核中，请等待主控审批通过后再登录。",
+            }
         if not account or not matched or account.get("status") != "active":
             _record_login_failure(guard_key, login_lock_seconds)
             db.add_log("门户登录失败", email, "", "邮箱或密码错误", ip)
@@ -2969,6 +3067,171 @@ def create_app(
         db.add_log("门户重置密码", email, "", "旧登录状态已失效", ip)
         return {"ok": True}
 
+    # ------------------------------------------------------------------
+    # 审批中心（仅主控端）与卡密转赠
+    # ------------------------------------------------------------------
+    def _approval_kind_text(kind: str) -> str:
+        return {
+            "user_register": "用户注册",
+            "admin_register": "管理员注册",
+            "license_transfer": "卡密转赠",
+        }.get(str(kind or ""), str(kind or ""))
+
+    def _notify_approval(approval: dict, result_text: str, detail_text: str = "") -> None:
+        try:
+            applicant = str(approval.get("applicant") or "")
+            if "@" in applicant:
+                mailer.enqueue(
+                    applicant,
+                    "approval_notice",
+                    {
+                        "kind_text": _approval_kind_text(approval.get("kind")),
+                        "result_text": result_text,
+                        "detail_text": detail_text,
+                    },
+                )
+        except Exception:
+            pass
+
+    def _apply_approval(approval: dict, reviewer: str) -> tuple[bool, str]:
+        """执行审批动作（委托 db.apply_approval —— 服务端与主控端共用实现）。"""
+        return db.apply_approval(int(approval.get("id") or 0), reviewer)
+
+    @app.get("/api/approvals")
+    def approvals_list(
+        kind: str = Query(default="", max_length=32),
+        status: str = Query(default="", max_length=16),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        admin: dict = Depends(require_master),
+    ):
+        items, total = db.list_approvals(kind, status, limit, offset)
+        return {"items": items, "total": total}
+
+    @app.post("/api/approvals/{approval_id}/approve")
+    def approval_approve(
+        approval_id: int,
+        request: Request,
+        body: ApprovalReviewBody | None = None,
+        admin: dict = Depends(require_master),
+    ):
+        note = str(getattr(body, "note", "") or "")
+        approval = db.get_approval(approval_id)
+        if not approval:
+            raise HTTPException(status_code=404, detail="审批记录不存在")
+        if str(approval.get("status")) != "pending":
+            raise HTTPException(status_code=409, detail="该审批已被处理")
+        if not db.review_approval(approval_id, "approved", admin["username"], note):
+            raise HTTPException(status_code=409, detail="该审批已被其他主控处理")
+        ok, detail = _apply_approval(approval, admin["username"])
+        if not ok:
+            db.review_approval(approval_id, "pending", "", "", only_pending=False)
+            raise HTTPException(status_code=400, detail=detail)
+        db.add_log(
+            "审批通过",
+            admin["username"],
+            f"#{approval_id}",
+            f"{_approval_kind_text(approval.get('kind'))} · {approval.get('applicant')}",
+            _client_ip(request),
+        )
+        _notify_approval(approval, "审批通过", detail)
+        if str(approval.get("kind")) == "license_transfer":
+            target = str(approval.get("target") or "")
+            if "@" in target:
+                try:
+                    mailer.enqueue(
+                        target,
+                        "approval_notice",
+                        {
+                            "kind_text": "卡密转入",
+                            "result_text": "已完成",
+                            "detail_text": detail,
+                        },
+                    )
+                except Exception:
+                    pass
+        return {"ok": True, "detail": detail}
+
+    @app.post("/api/approvals/{approval_id}/reject")
+    def approval_reject(
+        approval_id: int,
+        request: Request,
+        body: ApprovalReviewBody | None = None,
+        admin: dict = Depends(require_master),
+    ):
+        note = str(getattr(body, "note", "") or "")
+        approval = db.get_approval(approval_id)
+        if not approval:
+            raise HTTPException(status_code=404, detail="审批记录不存在")
+        if not db.review_approval(approval_id, "rejected", admin["username"], note):
+            raise HTTPException(status_code=409, detail="该审批已被处理")
+        if str(approval.get("kind")) == "user_register":
+            account = db.get_portal_account(str(approval.get("applicant") or ""))
+            if account:
+                db.set_portal_account_status(int(account["id"]), "disabled")
+        db.add_log(
+            "审批拒绝",
+            admin["username"],
+            f"#{approval_id}",
+            f"{_approval_kind_text(approval.get('kind'))} · {approval.get('applicant')}",
+            _client_ip(request),
+        )
+        _notify_approval(approval, "被驳回", note or "")
+        return {"ok": True}
+
+    @app.post("/api/portal/transfer_request")
+    def portal_transfer(
+        body: PortalTransferBody,
+        request: Request,
+        account: dict = Depends(current_portal),
+    ):
+        """用户发起卡密转赠申请（等待主控审批）。"""
+        ip = _client_ip(request)
+        key_code = security.normalize_key(body.key_code)
+        target_email = str(body.target_email or "").strip().lower()
+        if not key_code or not target_email:
+            raise HTTPException(status_code=400, detail="卡密与目标邮箱不能为空")
+        binding = db.get_portal_binding(account["id"])
+        if not binding or security.normalize_key(binding.get("key_code")) != key_code:
+            return {"ok": False, "code": "not_bound", "message": "当前账号未绑定该卡密"}
+        target = db.get_portal_account(target_email)
+        if not target or str(target.get("status")) != "active":
+            return {
+                "ok": False,
+                "code": "target_not_found",
+                "message": "目标账号不存在或未激活",
+            }
+        if int(target["id"]) == int(account["id"]):
+            raise HTTPException(status_code=400, detail="不能转赠给自己")
+        if db.get_portal_binding(int(target["id"])):
+            return {
+                "ok": False,
+                "code": "target_occupied",
+                "message": "目标账号已绑定其他卡密",
+            }
+        lic = db.get_license(key_code)
+        if not lic:
+            return {"ok": False, "code": "not_found", "message": "密钥不存在"}
+        if db.has_pending_transfer(int(lic["id"])):
+            return {
+                "ok": False,
+                "code": "duplicate",
+                "message": "该卡密已有待处理的转赠申请",
+            }
+        db.create_approval(
+            "license_transfer",
+            account["email"],
+            target_email,
+            {
+                "license_id": int(lic["id"]),
+                "key_code": key_code,
+                "from_account_id": int(account["id"]),
+                "to_account_id": int(target["id"]),
+            },
+        )
+        db.add_log("转赠申请", account["email"], key_code, f"-> {target_email}", ip)
+        return {"ok": True, "message": "转赠申请已提交，等待主控审批。"}
+
     @app.get("/api/logs")
     def logs(
         keyword: str = Query(default="", max_length=128),
@@ -3026,6 +3289,53 @@ def create_app(
         except AiConfirmationError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
+    def _account_binding_gate(body: ActivateBody, request: Request) -> dict | None:
+        """卡密-账号强挂钩检查：放行返回 None，否则返回拒绝 payload。
+
+        规则（security.binding_required，默认开）：
+        - SDK / 第三方宿主（X-Client-Kind: sdk）豁免；
+        - 其余请求必须携带 portal_token，且该卡密已绑定到该账号。
+        """
+        if not bool(config.security.get("binding_required", True)):
+            return None
+        client_kind = str(request.headers.get("X-Client-Kind", "") or "").strip().lower()
+        if client_kind == "sdk":
+            return None
+        token = str(getattr(body, "portal_token", "") or "").strip()
+        if not token:
+            return {
+                "ok": False,
+                "code": "account_required",
+                "message": "请先注册并登录账号，在账号中绑定卡密后激活。",
+            }
+        payload = security.verify_portal_token(
+            token, str(config.security.get("secret_key") or "")
+        )
+        if not payload:
+            return {
+                "ok": False,
+                "code": "account_required",
+                "message": "账号登录已失效，请重新登录后再激活。",
+            }
+        account_id = int(payload.get("uid") or 0)
+        account = db.get_portal_account_by_id(account_id)
+        if not account or str(account.get("status")) != "active":
+            return {
+                "ok": False,
+                "code": "account_required",
+                "message": "账号状态异常，无法激活。",
+            }
+        binding = db.get_portal_binding(account_id)
+        if not binding or security.normalize_key(binding.get("key_code")) != security.normalize_key(
+            body.key_code
+        ):
+            return {
+                "ok": False,
+                "code": "binding_required",
+                "message": "该卡密未绑定到当前账号——请先在账号面板中绑定卡密。",
+            }
+        return None
+
     @app.post("/api/client/activate")
     def activate(body: ActivateBody, request: Request):
         ip = _client_ip(request)
@@ -3034,6 +3344,10 @@ def create_app(
             f"activate|{ip}", activation_max_attempts, activation_lock_seconds
         ):
             raise HTTPException(status_code=429, detail="激活尝试过于频繁，请稍后再试")
+        gate = _account_binding_gate(body, request)
+        if gate is not None:
+            db.add_log("激活失败", "client", body.key_code, str(gate.get("code") or ""), ip)
+            return gate
         session_secret = security.generate_session_secret()
         result = do_activate(
             db,

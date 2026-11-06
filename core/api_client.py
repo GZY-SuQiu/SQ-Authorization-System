@@ -486,6 +486,9 @@ class ApiClient:
     def _store_portal_token(self, data: dict) -> dict:
         if not isinstance(data, dict) or not data.get("ok"):
             return data
+        if data.get("pending_approval"):
+            # 审批模式下注册成功但尚无会话（等待审批），不写 token。
+            return data
         token = str(data.get("token") or "").strip()
         if not token:
             raise ApiError("服务器未返回登录凭证")
@@ -684,6 +687,51 @@ class ApiClient:
         """一键换绑：解冻（如需）+ 解绑全部设备。"""
         return self._request(
             "POST", "/api/license/rebind", json_body={"key_code": key_code}
+        )
+
+    def list_approvals(self, kind: str = "", status: str = "",
+                       limit: int = 50, offset: int = 0) -> dict:
+        return self._request(
+            "GET",
+            "/api/approvals",
+            params={
+                "kind": kind,
+                "status": status,
+                "limit": int(limit),
+                "offset": int(offset),
+            },
+        )
+
+    def approve_approval(self, approval_id: int, note: str = "") -> dict:
+        return self._request(
+            "POST",
+            f"/api/approvals/{int(approval_id)}/approve",
+            json_body={"note": note},
+        )
+
+    def reject_approval(self, approval_id: int, note: str = "") -> dict:
+        return self._request(
+            "POST",
+            f"/api/approvals/{int(approval_id)}/reject",
+            json_body={"note": note},
+        )
+
+    def delete_portal_account(self, account_id: int) -> dict:
+        return self._request(
+            "POST", f"/api/admin/portal_accounts/{int(account_id)}/delete"
+        )
+
+    def delete_admin(self, admin_id: int) -> dict:
+        return self._request(
+            "POST", "/api/admin/delete", json_body={"admin_id": int(admin_id)}
+        )
+
+    def transfer_request(self, key_code: str, target_email: str) -> dict:
+        return self._request(
+            "POST",
+            "/api/portal/transfer_request",
+            json_body={"key_code": key_code, "target_email": target_email},
+            portal_auth=True,
         )
 
     def revoke_license(self, key_code: str) -> dict:
@@ -1041,6 +1089,7 @@ class ApiClient:
                 "machine_code": machine_code,
                 "device_name": device_name,
                 "machine_components": self._machine_components(),
+                "portal_token": str(getattr(self, "portal_token", "") or ""),
             },
             require_signature=True,
             attest_token=attest_token,

@@ -87,19 +87,22 @@ def _load_release_manifests(db: Database, config) -> int:
 
 
 def _reset_master_password(db: Database) -> int:
-    """Issue a fresh one-time password for the built-in admin account.
+    """为"第一个主控账号"生成新的一次性密码并输出（数据不动）。
 
-    This replaces the old advice of deleting license.db when the master
-    password is lost, which threw away every license along with it.
+    默认 admin 账号取消后主控可能有多个；这里对最早创建的主控生效。
     """
-    admin = db.get_admin("admin")
-    if not admin:
-        print("未找到 admin 账号，请先正常启动一次本地服务器完成初始化。")
+    masters = [a for a in db.list_admins() if str(a.get("role") or "") == "master"]
+    if not masters:
+        print("未找到主控账号。请先使用 --create-admin 用户名 密码 创建一个。")
         return 1
+    target = masters[0]
     password = security.generate_bootstrap_password()
-    db.set_admin_password(admin["id"], password, must_change_password=True)
-    db.add_log("重置主控密码", "命令行", "admin", "使用 --reset-master-password", "")
-    print("已重置 admin 账号密码（数据未改动）。")
+    db.set_admin_password(target["id"], password, must_change_password=True)
+    db.add_log(
+        "重置主控密码", "命令行", str(target.get("username") or ""),
+        "使用 --reset-master-password", "",
+    )
+    print(f"已重置主控账号 {target.get('username')} 的密码（数据未改动）。")
     print(f"一次性密码：{password}")
     print("请立即登录主控端并修改密码；旧登录状态已全部失效。")
     return 0
@@ -130,6 +133,24 @@ def main() -> int:
         "--show-console",
         action="store_true",
         help="GUI 模式下保留控制台窗口（调试用）",
+    )
+    parser.add_argument(
+        "--create-admin",
+        nargs=2,
+        metavar=("用户名", "密码"),
+        default=None,
+        help="创建一个管理员账号并退出（服务端创建免审批）",
+    )
+    parser.add_argument(
+        "--role",
+        choices=("master", "admin"),
+        default="master",
+        help="配合 --create-admin：目标角色（默认 master）",
+    )
+    parser.add_argument(
+        "--reset-server-password",
+        action="store_true",
+        help="重置服务端登录密码（SQ.admin）并输出一次性新密码后退出",
     )
     args = parser.parse_args()
 
@@ -175,7 +196,9 @@ def main() -> int:
     # The config secret seals activation session secrets inside license.db, so a
     # stolen database file alone cannot be used to forge device signatures.
     db = Database(config.db_path(), config.security.get("secret_key"))
-    created, bootstrap_password = db.ensure_default_admin()
+    # 主控端默认账号不再自动创建：首个主控由服务端界面「账号管理」创建，
+    # 或使用命令行 --create-admin（服务端创建免审批）。
+    server_account_created = db.ensure_server_account()
     upgraded_sessions = db.seal_legacy_sessions()
     if upgraded_sessions:
         db.add_log(
@@ -192,6 +215,32 @@ def main() -> int:
     except Exception as exc:
         print(f"警告：导入发布清单失败（{exc}），服务器继续启动。")
 
+    if args.reset_server_password:
+        password = db.reset_server_password()
+        print("已重置服务端登录密码（账号 SQ.admin）。")
+        print(f"一次性密码：{password}")
+        print("请打开服务端界面登录后尽快修改。")
+        return 0
+
+    if args.create_admin:
+        username, password = args.create_admin
+        username = str(username or "").strip()
+        if not username:
+            print("用户名不能为空。")
+            return 1
+        if db.get_admin(username):
+            print(f"账号已存在：{username}")
+            return 1
+        ok, msg = security.password_strength(str(password or ""))
+        if not ok:
+            print(f"密码不符合要求：{msg}")
+            return 1
+        db.create_admin(username, str(password), args.role)
+        db.add_log("创建管理员", "命令行", username, f"角色 {args.role}", "")
+        role_text = "主控" if args.role == "master" else "管理"
+        print(f"已创建{role_text}账号：{username}（服务端创建免审批）")
+        return 0
+
     if args.reset_master_password:
         return _reset_master_password(db)
 
@@ -201,10 +250,12 @@ def main() -> int:
         from server.api import create_app
 
         app = create_app(config, db)
-        if created:
-            print("首次运行已创建主控账号：admin")
-            print(f"一次性初始密码：{bootstrap_password}")
-            print("请登录后立即在“系统设置”中修改密码。")
+        if server_account_created:
+            print("首次运行：已创建服务端登录账号 SQ.admin（默认密码 SQ12345678）。")
+            print("请打开服务端界面登录后尽快修改密码。")
+        if not db.list_admins():
+            print("提示：当前还没有主控账号，请用命令创建：")
+            print("  本地服务器.exe --create-admin 用户名 密码")
         uvicorn.run(
             app,
             host=config.server["host"],
@@ -220,14 +271,16 @@ def main() -> int:
 
         winconsole.hide_console_window()
 
-    from server.ui import ServerWindow
+    from server.ui import ServerLoginDialog, ServerWindow
 
     app = QApplication(sys.argv)
-    theme.apply_theme(app, mode=config.client.get("theme_mode"))
-    # The one-time password is handed to the window so it can be shown in a
-    # modal dialog. A toast would be replaced by the "service started"
-    # notice about a second later, which is how the old build lost it.
-    window = ServerWindow(config, db, bootstrap_password=bootstrap_password or "")
+    theme.apply_theme(app)
+    # 服务端登录门（默认账号 SQ.admin / SQ12345678，可在设置中修改）。
+    login = ServerLoginDialog(config, db)
+    if login.exec() != login.Accepted:
+        print("未通过服务端登录，程序退出。")
+        return 0
+    window = ServerWindow(config, db, server_account_created=server_account_created)
     window.show()
     return app.exec()
 

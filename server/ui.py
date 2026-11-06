@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -358,15 +360,610 @@ class _AiAdvancedDialog(QDialog):
         super().accept()
 
 
+# --------------------------------------------------------------------------- #
+# 服务端登录与账号 / 审批管理对话框（C2/C3）
+# --------------------------------------------------------------------------- #
+_APPROVAL_KIND_TEXT = {
+    "user_register": "用户注册",
+    "admin_register": "管理员注册",
+    "license_transfer": "卡密转赠",
+}
+_APPROVAL_STATUS_TEXT = {
+    "pending": "待处理",
+    "approved": "已通过",
+    "rejected": "已拒绝",
+}
+
+
+def _approval_kind_text(kind: str) -> str:
+    return _APPROVAL_KIND_TEXT.get(str(kind or ""), str(kind or ""))
+
+
+def _enqueue_approval_mail(controller, approval: dict, result_text: str, detail: str = "") -> None:
+    """审批结果的邮件通知（任何异常都吞掉；无 mailer 时静默跳过）。"""
+    try:
+        mailer = getattr(controller, "_mailer", None) if controller is not None else None
+        if mailer is None:
+            return
+        applicant = str(approval.get("applicant") or "")
+        if "@" in applicant:
+            mailer.enqueue(
+                applicant,
+                "approval_notice",
+                {
+                    "kind_text": _approval_kind_text(approval.get("kind")),
+                    "result_text": result_text,
+                    "detail_text": detail,
+                },
+            )
+        target = str(approval.get("target") or "")
+        if (
+            str(approval.get("kind")) == "license_transfer"
+            and "@" in target
+            and result_text == "审批通过"
+        ):
+            mailer.enqueue(
+                target,
+                "approval_notice",
+                {"kind_text": "卡密转入", "result_text": "已完成", "detail_text": detail},
+            )
+    except Exception:
+        pass
+
+
+class ServerLoginDialog(QDialog):
+    """服务端登录门：默认账号 SQ.admin / SQ12345678，登录后可修改密码。"""
+
+    def __init__(self, config: Config, db: Database, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.db = db
+        self.setWindowTitle("本地服务器 · 登录")
+        self.setFixedWidth(430)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(PageHeader("服务端登录", "默认账号 SQ.admin / 密码 SQ12345678"))
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.username = QLineEdit(db.SERVER_DEFAULT_USERNAME)
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.password.setPlaceholderText("请输入密码")
+        form.addRow("账号", self.username)
+        form.addRow("密码", self.password)
+        layout.addLayout(form)
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("Muted")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
+        buttons = QHBoxLayout()
+        buttons.addWidget(make_button("修改密码", "ghost", self._open_change))
+        buttons.addStretch(1)
+        buttons.addWidget(make_button("登录", "primary", self._try_login))
+        layout.addLayout(buttons)
+        self.password.returnPressed.connect(self._try_login)
+        self.password.setFocus()
+
+    def _open_change(self) -> None:
+        ChangeServerPasswordDialog(self.config, self.db, self).exec()
+
+    def _try_login(self) -> None:
+        username = self.username.text().strip()
+        password = self.password.text()
+        if not username or not password:
+            self.error_label.setText("请输入账号与密码。")
+            return
+        if self.db.verify_server_login(username, password):
+            account = self.db.get_server_account() or {}
+            if int(account.get("must_change_password") or 0):
+                QMessageBox.information(
+                    self,
+                    "安全提示",
+                    "当前为一次性 / 默认密码，建议登录后立即修改。",
+                )
+            self.accept()
+            return
+        self.error_label.setText(
+            "账号或密码错误。若已忘记密码，请关闭窗口后执行：\n"
+            "本地服务器.exe --reset-server-password"
+        )
+        self.password.selectAll()
+        self.password.setFocus()
+
+
+class ChangeServerPasswordDialog(QDialog):
+    """修改服务端登录密码。"""
+
+    def __init__(self, config: Config, db: Database, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.db = db
+        self.setWindowTitle("修改服务端密码")
+        self.setFixedWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(PageHeader("修改服务端密码", "用于登录本地服务器界面"))
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.old = QLineEdit()
+        self.old.setEchoMode(QLineEdit.Password)
+        self.new = QLineEdit()
+        self.new.setEchoMode(QLineEdit.Password)
+        self.confirm_field = QLineEdit()
+        self.confirm_field.setEchoMode(QLineEdit.Password)
+        form.addRow("当前密码", self.old)
+        form.addRow("新密码", self.new)
+        form.addRow("确认新密码", self.confirm_field)
+        layout.addLayout(form)
+        self.error = QLabel("")
+        self.error.setObjectName("Muted")
+        self.error.setWordWrap(True)
+        layout.addWidget(self.error)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(make_button("取消", "ghost", self.reject))
+        buttons.addWidget(make_button("确认修改", "primary", self._submit))
+        layout.addLayout(buttons)
+
+    def _submit(self) -> None:
+        account = self.db.get_server_account() or {}
+        if not self.db.verify_server_login(
+            str(account.get("username") or ""), self.old.text()
+        ):
+            self.error.setText("当前密码不正确。")
+            return
+        if self.new.text() != self.confirm_field.text():
+            self.error.setText("两次输入的新密码不一致。")
+            return
+        ok, msg = self.db.set_server_password(self.new.text())
+        if not ok:
+            self.error.setText(msg)
+            return
+        self.db.add_log("修改服务端密码", "SQ.admin", "", "", "")
+        QMessageBox.information(self, "已完成", "服务端登录密码已更新。")
+        self.accept()
+
+
+class _CreateAccountDialog(QDialog):
+    """创建主控 / 管理账号（服务端创建免审批）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("新建账号")
+        self.setFixedWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(PageHeader("新建管理员账号", "服务端创建免审批，立即生效"))
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("登录用账号名")
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.password.setPlaceholderText("至少 8 位，含字母与数字")
+        self.role = QComboBox()
+        self.role.addItem("主控（全部权限）", "master")
+        self.role.addItem("管理（密钥运营）", "admin")
+        form.addRow("账号", self.username)
+        form.addRow("密码", self.password)
+        form.addRow("角色", self.role)
+        layout.addLayout(form)
+        self.error = QLabel("")
+        self.error.setObjectName("Muted")
+        self.error.setWordWrap(True)
+        layout.addWidget(self.error)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(make_button("取消", "ghost", self.reject))
+        buttons.addWidget(make_button("创建", "primary", self._submit))
+        layout.addLayout(buttons)
+
+    def _submit(self) -> None:
+        if not self.username.text().strip():
+            self.error.setText("账号不能为空。")
+            return
+        ok, msg = security.password_strength(self.password.text())
+        if not ok:
+            self.error.setText(msg)
+            return
+        self.accept()
+
+
+class AccountManagerDialog(QDialog):
+    """账号管理：创建 / 启用 / 禁用 / 删除 主控与管理账号（服务端直连，免审批）。"""
+
+    def __init__(self, config: Config, db: Database, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.db = db
+        self.setWindowTitle("账号管理")
+        self.resize(900, 560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        header = QHBoxLayout()
+        header.addWidget(PageHeader("账号管理", "主控 / 管理账号（服务端创建免审批）"))
+        header.addStretch(1)
+        header.addWidget(make_button("新建账号", "primary", self._create))
+        header.addWidget(make_button("刷新", "ghost", self.reload))
+        layout.addLayout(header)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "账号", "角色", "状态", "邮箱", "最近登录", "创建时间"]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._ctx_menu)
+        layout.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        self.hint = QLabel("")
+        self.hint.setObjectName("Muted")
+        footer.addWidget(self.hint)
+        footer.addStretch(1)
+        footer.addWidget(make_button("启用", "default", lambda: self._set_status("active")))
+        footer.addWidget(make_button("禁用", "default", lambda: self._set_status("disabled")))
+        footer.addWidget(make_button("重置密码", "ghost", self._reset_password))
+        footer.addWidget(make_button("删除", "danger", self._delete))
+        footer.addWidget(make_button("关闭", "ghost", self.reject))
+        layout.addLayout(footer)
+
+        self._menu = QMenu(self)
+        self._menu.addAction("启用账号", lambda: self._set_status("active"))
+        self._menu.addAction("禁用账号", lambda: self._set_status("disabled"))
+        self._menu.addSeparator()
+        self._menu.addAction("重置密码", self._reset_password)
+        self._menu.addAction("复制账号名", self._copy_username)
+        self._menu.addSeparator()
+        self._menu.addAction("删除账号", self._delete)
+        self.reload()
+
+    def reload(self) -> None:
+        rows = self.db.list_admins()
+        self.table.setRowCount(0)
+        for item in rows:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            values = [
+                str(item.get("id") or ""),
+                str(item.get("username") or ""),
+                "主控" if str(item.get("role")) == "master" else "管理",
+                "正常" if str(item.get("status")) == "active" else "已禁用",
+                str(item.get("email") or "—"),
+                str(item.get("last_login_at") or "—"),
+                str(item.get("created_at") or ""),
+            ]
+            for col, value in enumerate(values):
+                self.table.setItem(row, col, QTableWidgetItem(value))
+        count = len(rows)
+        masters = sum(1 for item in rows if str(item.get("role")) == "master")
+        self.hint.setText(f"共 {count} 个账号（主控 {masters} 个）")
+
+    def _current(self) -> dict | None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "提示", "请先选择一个账号。")
+            return None
+        try:
+            admin_id = int(self.table.item(row, 0).text())
+        except (AttributeError, ValueError):
+            return None
+        return self.db.get_admin_by_id(admin_id)
+
+    def _ctx_menu(self, pos) -> None:
+        if not self.table.indexAt(pos).isValid():
+            return
+        self._menu.popup(self.table.viewport().mapToGlobal(pos))
+
+    def _copy_username(self) -> None:
+        target = self._current()
+        if target:
+            QApplication.clipboard().setText(str(target.get("username") or ""))
+            self.hint.setText("账号名已复制")
+
+    def _create(self) -> None:
+        dialog = _CreateAccountDialog(self)
+        if dialog.exec() != dialog.Accepted:
+            return
+        username = dialog.username.text().strip()
+        if self.db.get_admin(username):
+            QMessageBox.warning(self, "创建失败", f"账号已存在：{username}")
+            return
+        role = str(dialog.role.currentData() or "admin")
+        self.db.create_admin(username, dialog.password.text(), role)
+        self.db.add_log("创建管理员", "SQ.admin", username, f"角色 {role}", "")
+        self.reload()
+        QMessageBox.information(
+            self,
+            "已创建",
+            f"{'主控' if role == 'master' else '管理'}账号 {username} 已创建并生效（免审批）。",
+        )
+
+    def _set_status(self, status: str) -> None:
+        target = self._current()
+        if not target:
+            return
+        if str(target.get("status")) == status:
+            self.hint.setText("该账号已处于目标状态。")
+            return
+        if status == "disabled" and str(target.get("role")) == "master":
+            actives = [
+                item
+                for item in self.db.list_admins()
+                if str(item.get("role")) == "master"
+                and str(item.get("status")) == "active"
+            ]
+            if len(actives) <= 1:
+                QMessageBox.warning(
+                    self,
+                    "无法禁用",
+                    "这是最后一个启用中的主控账号——请先创建/启用另一个主控，避免无人可登录。",
+                )
+                return
+        self.db.set_admin_status(int(target["id"]), status)
+        self.db.add_log(
+            "修改管理员状态", "SQ.admin", str(target.get("username") or ""), status, ""
+        )
+        self.reload()
+
+    def _reset_password(self) -> None:
+        target = self._current()
+        if not target:
+            return
+        text, ok = QInputDialog.getText(
+            self,
+            "重置密码",
+            f"为 {target.get('username')} 设置新密码（至少 8 位含字母数字）：",
+        )
+        if not ok or not text:
+            return
+        ok_pw, msg = security.password_strength(text)
+        if not ok_pw:
+            QMessageBox.warning(self, "无效密码", msg)
+            return
+        self.db.set_admin_password(int(target["id"]), text, must_change_password=True)
+        self.db.add_log(
+            "重置管理员密码",
+            "SQ.admin",
+            str(target.get("username") or ""),
+            "下次登录须改密",
+            "",
+        )
+        QMessageBox.information(
+            self,
+            "已重置",
+            f"{target.get('username')} 的密码已更新；其旧登录状态全部失效。",
+        )
+
+    def _delete(self) -> None:
+        target = self._current()
+        if not target:
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除账号",
+            f"确定删除账号 {target.get('username')}？\n"
+            "删除后该账号立即无法登录（不可撤销；日常建议使用「禁用」）。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self.db.delete_admin(int(target["id"])):
+            QMessageBox.warning(
+                self, "无法删除", "删除失败：系统需至少保留一个主控账号（或账号不存在）。"
+            )
+            return
+        self.db.add_log("删除管理员", "SQ.admin", str(target.get("username") or ""), "", "")
+        self.reload()
+
+
+class ApprovalCenterDialog(QDialog):
+    """审批中心：总开关 + 提示文案 + 审批列表（服务端直连；业务逻辑与主控端一致）。"""
+
+    def __init__(self, config: Config, db: Database, controller=None, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.db = db
+        self.controller = controller
+        self.setWindowTitle("审批中心")
+        self.resize(960, 620)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        header = QHBoxLayout()
+        header.addWidget(PageHeader("审批中心", "用户注册 / 管理员注册 / 卡密转赠"))
+        header.addStretch(1)
+        header.addWidget(make_button("刷新", "ghost", self.reload))
+        layout.addLayout(header)
+
+        settings = Card(padding=14)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.toggle = QCheckBox("启用审批")
+        self.toggle.setChecked(bool(config.security.get("approval_enabled", True)))
+        self.toggle.setToolTip(
+            "开启：用户注册 / 主控端创建管理员 / 卡密转赠都需审批；\n关闭：直接放行。"
+        )
+        row.addWidget(self.toggle)
+        row.addWidget(QLabel("提示文案"))
+        self.hint_edit = QLineEdit(str(config.security.get("approval_hint_text") or ""))
+        self.hint_edit.setPlaceholderText(
+            "提交申请时展示给用户的提示（如：为避免服务器繁忙，需进行管理员审批）"
+        )
+        row.addWidget(self.hint_edit, 1)
+        row.addWidget(make_button("保存设置", "primary", self._save_settings))
+        settings.body.addLayout(row)
+        layout.addWidget(settings)
+
+        filters = QHBoxLayout()
+        self.kind_box = QComboBox()
+        self.kind_box.addItem("全部类型", "")
+        self.kind_box.addItem("用户注册", "user_register")
+        self.kind_box.addItem("管理员注册", "admin_register")
+        self.kind_box.addItem("卡密转赠", "license_transfer")
+        self.status_box = QComboBox()
+        self.status_box.addItem("待处理", "pending")
+        self.status_box.addItem("全部状态", "")
+        self.status_box.addItem("已通过", "approved")
+        self.status_box.addItem("已拒绝", "rejected")
+        self.kind_box.currentIndexChanged.connect(lambda _i: self.reload())
+        self.status_box.currentIndexChanged.connect(lambda _i: self.reload())
+        filters.addWidget(self.kind_box)
+        filters.addWidget(self.status_box)
+        filters.addStretch(1)
+        self.count_label = QLabel("")
+        self.count_label.setObjectName("Muted")
+        filters.addWidget(self.count_label)
+        layout.addLayout(filters)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "类型", "申请人", "目标", "提交时间", "状态", "处理人"]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._ctx_menu)
+        layout.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(make_button("通过", "primary", lambda: self._review(True)))
+        footer.addWidget(make_button("拒绝", "danger", lambda: self._review(False)))
+        footer.addWidget(make_button("关闭", "ghost", self.reject))
+        layout.addLayout(footer)
+
+        self._menu = QMenu(self)
+        self._menu.addAction("通过", lambda: self._review(True))
+        self._menu.addAction("拒绝", lambda: self._review(False))
+        self._menu.addSeparator()
+        self._menu.addAction("复制申请人", self._copy_applicant)
+        self.reload()
+
+    def _save_settings(self) -> None:
+        self.config.security["approval_enabled"] = bool(self.toggle.isChecked())
+        self.config.security["approval_hint_text"] = self.hint_edit.text().strip()
+        self.config.save()
+        self.db.add_log(
+            "更新审批设置",
+            "SQ.admin",
+            "",
+            f"审批={'开启' if self.toggle.isChecked() else '关闭'}",
+            "",
+        )
+        QMessageBox.information(self, "已保存", "审批设置已更新（即刻生效）。")
+
+    def reload(self) -> None:
+        kind = str(self.kind_box.currentData() or "")
+        status = str(self.status_box.currentData() or "")
+        items, total = self.db.list_approvals(kind, status, 200, 0)
+        self.table.setRowCount(0)
+        for item in items:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            values = [
+                str(item.get("id") or ""),
+                _approval_kind_text(item.get("kind")),
+                str(item.get("applicant") or ""),
+                str(item.get("target") or "—"),
+                str(item.get("created_at") or ""),
+                _APPROVAL_STATUS_TEXT.get(str(item.get("status")), str(item.get("status"))),
+                str(item.get("reviewer") or "—"),
+            ]
+            for col, value in enumerate(values):
+                self.table.setItem(row, col, QTableWidgetItem(value))
+        pending = self.db.count_pending_approvals()
+        self.count_label.setText(f"当前列表 {total} 条 · 待处理合计 {pending} 条")
+
+    def _current(self) -> dict | None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "提示", "请先选择一条审批记录。")
+            return None
+        try:
+            approval_id = int(self.table.item(row, 0).text())
+        except (AttributeError, ValueError):
+            return None
+        return self.db.get_approval(approval_id)
+
+    def _ctx_menu(self, pos) -> None:
+        if not self.table.indexAt(pos).isValid():
+            return
+        self._menu.popup(self.table.viewport().mapToGlobal(pos))
+
+    def _copy_applicant(self) -> None:
+        approval = self._current()
+        if approval:
+            QApplication.clipboard().setText(str(approval.get("applicant") or ""))
+            self.count_label.setText("申请人已复制")
+
+    def _review(self, approve: bool) -> None:
+        approval = self._current()
+        if not approval:
+            return
+        if str(approval.get("status")) != "pending":
+            QMessageBox.information(self, "已处理", "该审批不在待处理状态。")
+            self.reload()
+            return
+        note, ok = QInputDialog.getText(
+            self, "审批备注", "备注（可留空）：" if approve else "驳回原因（可留空）："
+        )
+        if not ok:
+            return
+        approval_id = int(approval["id"])
+        status = "approved" if approve else "rejected"
+        if not self.db.review_approval(approval_id, status, "SQ.admin", note or ""):
+            QMessageBox.information(self, "已被处理", "该审批已被其他端处理。")
+            self.reload()
+            return
+        if approve:
+            ok2, detail = self.db.apply_approval(approval_id, "SQ.admin")
+            if not ok2:
+                self.db.review_approval(
+                    approval_id, "pending", "", "", only_pending=False
+                )
+                QMessageBox.warning(self, "执行失败", detail)
+                self.reload()
+                return
+        else:
+            detail = "已驳回。" + (f"原因：{note}" if note else "")
+            if str(approval.get("kind")) == "user_register":
+                account = self.db.get_portal_account(str(approval.get("applicant") or ""))
+                if account:
+                    self.db.set_portal_account_status(int(account["id"]), "disabled")
+        self.db.add_log(
+            "审批通过" if approve else "审批拒绝",
+            "SQ.admin",
+            f"#{approval_id}",
+            f"{_approval_kind_text(approval.get('kind'))} · {approval.get('applicant')}",
+            "",
+        )
+        _enqueue_approval_mail(
+            self.controller, approval, "审批通过" if approve else "被驳回", detail
+        )
+        QMessageBox.information(self, "已处理", detail)
+        self.reload()
+
+
 class ServerWindow(QMainWindow):
-    def __init__(self, config: Config, db: Database, bootstrap_password: str = ""):
+    def __init__(self, config: Config, db: Database, server_account_created: bool = False):
         super().__init__()
         self.config = config
         self.db = db
         self.controller = ServerController(config, db)
-        # Set while the first-run credential dialog is on screen so the
-        # auto-start toast cannot bury the one-time password.
-        self._bootstrap_pending = False
+        # 首启提示由 present_server_account_notice 处理（服务端账号已创建）。
         self.client = ApiClient(
             config.server_url(),
             timeout=3,
@@ -411,15 +1008,9 @@ class ServerWindow(QMainWindow):
         self.timer.start(10000)
 
         self.refresh()
-        if bootstrap_password:
-            # Hold auto-start back until the operator has actually seen and
-            # dismissed the one-time password.
-            self._bootstrap_pending = True
-            self._bootstrap_password = bootstrap_password
-            QTimer.singleShot(0, self.present_bootstrap_credentials)
-        else:
-            self._bootstrap_password = ""
-            QTimer.singleShot(300, self.auto_start)
+        if server_account_created:
+            QTimer.singleShot(0, self.present_server_account_notice)
+        QTimer.singleShot(300, self.auto_start)
 
     def _build_topbar(self) -> QWidget:
         card = Card(padding=16)
@@ -437,6 +1028,13 @@ class ServerWindow(QMainWindow):
 
         row.addLayout(titles)
         row.addStretch(1)
+
+        self.btn_accounts = make_button("账号管理", "default", self.open_account_manager)
+        self.btn_approvals = make_button("审批中心", "default", self.open_approval_center)
+        self.btn_change_pwd = make_button("修改服务端密码", "ghost", self.open_change_password)
+        row.addWidget(self.btn_accounts)
+        row.addWidget(self.btn_approvals)
+        row.addWidget(self.btn_change_pwd)
 
         self.status_chip = StatusBadge("● 已停止", "error")
         self.status_chip.setMinimumWidth(96)
@@ -900,79 +1498,25 @@ class ServerWindow(QMainWindow):
         column.addStretch(1)
         return body
 
-    def present_bootstrap_credentials(self) -> None:
-        """Modal, copyable first-run credentials; starts the service after."""
-        password = self._bootstrap_password
-        dialog = QDialog(self)
-        dialog.setWindowTitle("首次运行 · 主控账号")
-        dialog.setModal(True)
-
-        outer = QVBoxLayout(dialog)
-        outer.setContentsMargins(24, 22, 24, 20)
-        outer.setSpacing(12)
-        outer.addWidget(
-            PageHeader(
-                "已创建主控账号", "该密码只显示这一次，请立即保存并在登录后修改"
-            )
+    def present_server_account_notice(self) -> None:
+        """首启提示：已创建服务端登录账号（默认密码请尽快修改）。"""
+        QMessageBox.information(
+            self,
+            "首次运行 · 服务端账号",
+            "已创建服务端登录账号：SQ.admin\n"
+            "默认密码：SQ12345678\n\n"
+            "请尽快点击右上角「修改服务端密码」进行修改。\n"
+            "主控 / 管理账号请到「账号管理」中创建（服务端创建免审批）。",
         )
 
-        form = QFormLayout()
-        form.setSpacing(10)
-        user_field = QLineEdit("admin")
-        pass_field = QLineEdit(password)
-        for field in (user_field, pass_field):
-            field.setReadOnly(True)
-            field.setMinimumHeight(30)
-            field.setCursorPosition(0)
-        form.addRow("用户名", user_field)
-        form.addRow("初始密码", pass_field)
-        outer.addLayout(form)
+    def open_account_manager(self) -> None:
+        AccountManagerDialog(self.config, self.db, self).exec()
 
-        hint = QLabel("服务将在关闭本窗口后自动启动。")
-        hint.setObjectName("Muted")
-        hint.setWordWrap(True)
-        outer.addWidget(hint)
+    def open_approval_center(self) -> None:
+        ApprovalCenterDialog(self.config, self.db, self.controller, self).exec()
 
-        buttons = QDialogButtonBox()
-        copy_user_button = QPushButton("复制账号")
-        copy_password_button = QPushButton("复制密码")
-        copy_button = QPushButton("复制账号密码")
-        buttons.addButton("我已保存", QDialogButtonBox.AcceptRole)
-        buttons.addButton(copy_user_button, QDialogButtonBox.ActionRole)
-        buttons.addButton(copy_password_button, QDialogButtonBox.ActionRole)
-        buttons.addButton(copy_button, QDialogButtonBox.ActionRole)
-
-        copy_user_button.clicked.connect(self._copy_bootstrap_username)
-        copy_password_button.clicked.connect(self._copy_bootstrap_password)
-        copy_button.clicked.connect(self._copy_bootstrap_both)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        outer.addWidget(buttons)
-
-        dialog.setMinimumWidth(460)
-        try:
-            dialog.exec()
-        finally:
-            # Drop the plaintext password as soon as the operator dismisses
-            # the dialog; nothing here is written to disk.
-            self._bootstrap_password = ""
-            pass_field.clear()
-            self._bootstrap_pending = False
-            self.auto_start()
-
-    def _copy_bootstrap_username(self) -> None:
-        """首次引导弹窗的复制动作拆成小方法，便于单测直接调用。"""
-        QApplication.clipboard().setText("admin")
-        self.toast.show_message("账号已复制", "success")
-
-    def _copy_bootstrap_password(self) -> None:
-        QApplication.clipboard().setText(str(self._bootstrap_password or ""))
-        self.toast.show_message("密码已复制", "success")
-
-    def _copy_bootstrap_both(self) -> None:
-        QApplication.clipboard().setText(f"admin\n{self._bootstrap_password or ''}")
-        self.toast.show_message("账号密码已复制", "success")
-
+    def open_change_password(self) -> None:
+        ChangeServerPasswordDialog(self.config, self.db, self).exec()
     def _build_logs(self) -> QWidget:
         card = Card(padding=18)
         header = QHBoxLayout()
