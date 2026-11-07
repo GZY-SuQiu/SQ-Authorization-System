@@ -275,9 +275,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     theme.apply_theme(app)
-    # 服务端登录门（默认账号 SQ.admin / SQ12345678，可在设置中修改）。
+    # 服务端登录门（默认账号 SQ.admin / SQ12345678；修改密码在登录后的界面内）。
     login = ServerLoginDialog(config, db)
-    if login.exec() != login.Accepted:
+    if not login.exec():  # 0 = Rejected；避免实例访问 Qt 枚举（PySide6 会报错）
         print("未通过服务端登录，程序退出。")
         return 0
     window = ServerWindow(config, db, server_account_created=server_account_created)

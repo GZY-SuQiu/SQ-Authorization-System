@@ -412,7 +412,10 @@ def _enqueue_approval_mail(controller, approval: dict, result_text: str, detail:
 
 
 class ServerLoginDialog(QDialog):
-    """服务端登录门：默认账号 SQ.admin / SQ12345678，登录后可修改密码。"""
+    """服务端登录门：默认账号 SQ.admin / SQ12345678。
+
+    修改密码在登录后的界面内进行（右上角「修改服务端密码」）；本窗口只负责登录。
+    """
 
     def __init__(self, config: Config, db: Database, parent=None):
         super().__init__(parent)
@@ -438,15 +441,18 @@ class ServerLoginDialog(QDialog):
         self.error_label.setWordWrap(True)
         layout.addWidget(self.error_label)
         buttons = QHBoxLayout()
-        buttons.addWidget(make_button("修改密码", "ghost", self._open_change))
         buttons.addStretch(1)
         buttons.addWidget(make_button("登录", "primary", self._try_login))
         layout.addLayout(buttons)
+        hint = QLabel(
+            "修改密码：登录后在界面右上角「修改服务端密码」进行。\n"
+            "忘记密码：关闭本窗口后执行  本地服务器.exe --reset-server-password"
+        )
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         self.password.returnPressed.connect(self._try_login)
         self.password.setFocus()
-
-    def _open_change(self) -> None:
-        ChangeServerPasswordDialog(self.config, self.db, self).exec()
 
     def _try_login(self) -> None:
         username = self.username.text().strip()
@@ -672,7 +678,7 @@ class AccountManagerDialog(QDialog):
 
     def _create(self) -> None:
         dialog = _CreateAccountDialog(self)
-        if dialog.exec() != dialog.Accepted:
+        if not dialog.exec():  # 避免实例访问 Qt 枚举
             return
         username = dialog.username.text().strip()
         if self.db.get_admin(username):
