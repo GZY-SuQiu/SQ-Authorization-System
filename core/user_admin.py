@@ -5,6 +5,7 @@ client, shows which licence key each one bound, and lets an operator
 enable/disable the account or force the device binding to be released.
 """
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
