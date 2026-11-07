@@ -399,6 +399,91 @@ class C1ApiTests(unittest.TestCase):
         rejected, _ = self.db.list_approvals("admin_register", "rejected")
         self.assertTrue(any("账号已删除" in (a.get("review_note") or "") for a in rejected))
 
+    def test_rejected_application_destroys_account(self):
+        """拒绝即销毁：审批被拒后账号不存在，无法被任何路径启用。"""
+        self.master._request(
+            "POST", "/api/admin/create",
+            json_body={"username": "rj", "password": "Rj#Pass2026", "role": "admin"},
+        )
+        target = self.db.get_admin("rj")
+        self.assertIsNotNone(target)
+        items, _ = self.db.list_approvals("admin_register", "pending")
+        ok, detail = self.db.reject_admin_application(
+            int(items[0]["id"]), "SQ.admin", "不通过"
+        )
+        self.assertTrue(ok, detail)
+        self.assertIsNone(self.db.get_admin("rj"))
+
+    def test_rejected_residual_cannot_be_enabled(self):
+        """残留防线：即使账号没被销毁（历史数据），启用也被拦。"""
+        self.master._request(
+            "POST", "/api/admin/create",
+            json_body={"username": "rs", "password": "Rs#Pass2026", "role": "admin"},
+        )
+        target = self.db.get_admin("rs")
+        items, _ = self.db.list_approvals("admin_register", "pending")
+        # 手工只改审批状态、不删账号（模拟历史残留）
+        self.db.review_approval(int(items[0]["id"]), "rejected", "SQ.admin", "残留")
+        # HTTP 启用被拦
+        with self.assertRaises(Exception) as ctx:
+            self.master._request(
+                "POST", "/api/admin/status",
+                json_body={"admin_id": int(target["id"]), "status": "active"},
+            )
+        self.assertIn("拒绝", str(ctx.exception))
+        # 数据库底层也拦（防任何未来调用点）
+        with self.assertRaises(ValueError):
+            self.db.set_admin_status(int(target["id"]), "active")
+
+    def test_ai_tools_cannot_bypass_approval(self):
+        """AI 工具不能绕过：创建走审批、启用被拦。"""
+        from server.ai_tools import ToolRegistry
+
+        registry = ToolRegistry(self.db, dict(self.config.security), "GSQ")
+        operator = {"username": "admin", "role": "master", "id": 1}
+        result = registry.call(
+            "create_admin",
+            {"username": "aix", "password": "Aix#Pass2026", "role": "admin"},
+            operator,
+            "127.0.0.1",
+        )
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(result.get("pending_approval"))
+        target = self.db.get_admin("aix")
+        self.assertEqual(str(target["status"]), "disabled")
+        # AI 试图直接启用 → 被拦
+        with self.assertRaises(Exception) as ctx:
+            registry.call(
+                "set_admin_status",
+                {"admin_id": int(target["id"]), "status": "active"},
+                operator,
+                "127.0.0.1",
+            )
+        self.assertTrue(
+            "审批" in str(ctx.exception) or "拒绝" in str(ctx.exception), ctx
+        )
+
+    def test_reenable_after_approval_works(self):
+        """批准后：正常禁用/启用不再受创建审批限制。"""
+        self.master._request(
+            "POST", "/api/admin/create",
+            json_body={"username": "ok1", "password": "Ok1#Pass2026", "role": "admin"},
+        )
+        self._approve_admin_register_directly()
+        target = self.db.get_admin("ok1")
+        self.assertEqual(str(target["status"]), "active")
+        # 正常管理动作不受限
+        self.master._request(
+            "POST", "/api/admin/status",
+            json_body={"admin_id": int(target["id"]), "status": "disabled"},
+        )
+        self.assertEqual(str(self.db.get_admin("ok1")["status"]), "disabled")
+        self.master._request(
+            "POST", "/api/admin/status",
+            json_body={"admin_id": int(target["id"]), "status": "active"},
+        )
+        self.assertEqual(str(self.db.get_admin("ok1")["status"]), "active")
+
     def test_delete_admin_protection(self):
         # 1) 删除自己：拒绝
         admin = self.db.get_admin("admin")

@@ -2443,11 +2443,11 @@ def create_app(
         items = db.list_admins()
         for item in items:
             try:
-                item["pending_review"] = db.has_pending_admin_approval(
-                    int(item.get("id") or 0)
-                )
+                block = db.admin_approval_block(int(item.get("id") or 0))
             except Exception:
-                item["pending_review"] = False
+                block = ""
+            item["review_block"] = block
+            item["pending_review"] = block == "pending"  # 兼容旧字段
         return {"items": items}
 
     @app.post("/api/admin/create")
@@ -2462,11 +2462,10 @@ def create_app(
         ok, msg = security.password_strength(body.password)
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
-        admin_id = db.create_admin(username, body.password, body.role)
-        # 硬规则：本 HTTP 端点即"主控端通道"——创建的管理员一律进入待审批，
-        # 由服务器端审批后启用（不受审批总开关影响；服务端界面与 CLI 走
-        # db 直连创建，天然免审批）。
-        db.set_admin_status(admin_id, "disabled")
+        # 硬规则：本 HTTP 端点即"主控端通道"——创建的管理员一律为"待审批"
+        # 状态（approved=False 一步到位；不受审批总开关影响；服务端界面与
+        # CLI 走 db 直连创建，天然免审批）。
+        admin_id = db.create_admin(username, body.password, body.role, approved=False)
         db.create_approval(
             "admin_register",
             admin["username"],
@@ -2491,11 +2490,18 @@ def create_app(
             raise HTTPException(status_code=404, detail="管理员不存在")
         if target["id"] == admin["id"]:
             raise HTTPException(status_code=400, detail="不能修改自己的状态")
-        if body.status == "active" and db.has_pending_admin_approval(target["id"]):
-            raise HTTPException(
-                status_code=400,
-                detail="该账号的创建申请尚未经服务器端审批——请在服务器端「审批中心」处理后自动启用。",
-            )
+        if body.status == "active":
+            block = db.admin_approval_block(target["id"])
+            if block == "pending":
+                raise HTTPException(
+                    status_code=400,
+                    detail="该账号的创建申请尚未经服务器端审批——请在服务器端「审批中心」处理后自动启用。",
+                )
+            if block == "rejected":
+                raise HTTPException(
+                    status_code=400,
+                    detail="该账号的创建申请已被服务器端拒绝——请删除该账号后重新创建。",
+                )
         if target["role"] == "master":
             raise HTTPException(status_code=403, detail="不能禁用另一位主控账号")
         db.set_admin_status(target["id"], body.status)

@@ -701,14 +701,24 @@ class AccountManagerDialog(QDialog):
         if str(target.get("status")) == status:
             self.hint.setText("该账号已处于目标状态。")
             return
-        if status == "active" and self.db.has_pending_admin_approval(int(target["id"])):
-            QMessageBox.information(
-                self,
-                "需先审批",
-                "该账号有待处理的服务端创建审批——\n"
-                "请到「审批中心」通过该申请，账号将自动启用。",
-            )
-            return
+        if status == "active":
+            block = self.db.admin_approval_block(int(target["id"]))
+            if block == "pending":
+                QMessageBox.information(
+                    self,
+                    "需先审批",
+                    "该账号有待处理的服务端创建审批——\n"
+                    "请到「审批中心」通过该申请，账号将自动启用。",
+                )
+                return
+            if block == "rejected":
+                QMessageBox.information(
+                    self,
+                    "已被拒绝",
+                    "该账号的创建申请已被拒绝，不能启用；\n"
+                    "请删除该账号后重新创建。",
+                )
+                return
         if status == "disabled" and str(target.get("role")) == "master":
             actives = [
                 item
@@ -937,12 +947,11 @@ class ApprovalCenterDialog(QDialog):
         if not ok:
             return
         approval_id = int(approval["id"])
-        status = "approved" if approve else "rejected"
-        if not self.db.review_approval(approval_id, status, "SQ.admin", note or ""):
-            QMessageBox.information(self, "已被处理", "该审批已被其他端处理。")
-            self.reload()
-            return
         if approve:
+            if not self.db.review_approval(approval_id, "approved", "SQ.admin", note or ""):
+                QMessageBox.information(self, "已被处理", "该审批已被其他端处理。")
+                self.reload()
+                return
             ok2, detail = self.db.apply_approval(approval_id, "SQ.admin")
             if not ok2:
                 self.db.review_approval(
@@ -952,11 +961,27 @@ class ApprovalCenterDialog(QDialog):
                 self.reload()
                 return
         else:
-            detail = "已驳回。" + (f"原因：{note}" if note else "")
-            if str(approval.get("kind")) == "user_register":
-                account = self.db.get_portal_account(str(approval.get("applicant") or ""))
-                if account:
-                    self.db.set_portal_account_status(int(account["id"]), "disabled")
+            if str(approval.get("kind")) == "admin_register":
+                # 拒绝即销毁账号（防"被拒后启用"绕过）。
+                ok2, detail = self.db.reject_admin_application(
+                    approval_id, "SQ.admin", note or ""
+                )
+                if not ok2:
+                    QMessageBox.information(self, "已被处理", detail)
+                    self.reload()
+                    return
+            else:
+                if not self.db.review_approval(
+                    approval_id, "rejected", "SQ.admin", note or ""
+                ):
+                    QMessageBox.information(self, "已被处理", "该审批已被其他端处理。")
+                    self.reload()
+                    return
+                detail = "已驳回。" + (f"原因：{note}" if note else "")
+                if str(approval.get("kind")) == "user_register":
+                    account = self.db.get_portal_account(str(approval.get("applicant") or ""))
+                    if account:
+                        self.db.set_portal_account_status(int(account["id"]), "disabled")
         self.db.add_log(
             "审批通过" if approve else "审批拒绝",
             "SQ.admin",

@@ -646,17 +646,24 @@ class Database:
         password: str,
         role: str = "admin",
         must_change_password: bool = False,
+        approved: bool = True,
     ) -> int:
+        """创建管理员；approved=False 表示"待服务器端审批"（初始即禁用）。
+
+        服务端界面 / CLI / 初始化走默认 approved=True（免审批）；
+        主控端 HTTP 通道与 AI 工具传 approved=False 并登记创建审批。
+        """
         pw_hash, salt = security.hash_password(password)
         return self._execute(
             "INSERT INTO admins (username, password_hash, salt, role, status,"
             " auth_version, must_change_password, created_at)"
-            " VALUES (?, ?, ?, ?, 'active', 0, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
             (
                 username.strip(),
                 pw_hash,
                 salt,
                 role,
+                "active" if approved else "disabled",
                 int(bool(must_change_password)),
                 security.now_str(),
             ),
@@ -678,7 +685,25 @@ class Database:
         )
         return [dict(r) for r in rows]
 
-    def set_admin_status(self, admin_id: int, status: str) -> None:
+    def set_admin_status(self, admin_id: int, status: str, force: bool = False) -> None:
+        """修改管理员状态（**所有路径共用的最终防线**）。
+
+        force=False（默认）时，把"未通过服务器端审批"的账号（待审批/被拒）
+        的**启用**动作拦下——HTTP 端点、服务端界面、AI 工具均无法绕过；
+        审批通过路径内部使用 force=True。
+        """
+        if status == "active" and not force:
+            block = self.admin_approval_block(int(admin_id or 0))
+            if block == "pending":
+                raise ValueError(
+                    "该账号的创建申请尚未经服务器端审批，不能启用；"
+                    "请在服务器端「审批中心」处理。"
+                )
+            if block == "rejected":
+                raise ValueError(
+                    "该账号的创建申请已被服务端拒绝，不能启用；"
+                    "请删除该账号后重新创建。"
+                )
         self._execute(
             "UPDATE admins SET status = ?, auth_version = auth_version + 1"
             " WHERE id = ?",
@@ -3759,6 +3784,34 @@ class Database:
     # ------------------------------------------------------------------ #
     # 审批中心（服务端与主控端共用）
     # ------------------------------------------------------------------ #
+    def reject_admin_application(self, approval_id: int, reviewer: str,
+                                 note: str = "") -> tuple[bool, str]:
+        """拒绝"管理员创建"审批并销毁对应账号。
+
+        "拒绝即销毁"是本系统的硬规则：审批被拒后，账号不能通过任何"启用"
+        路径复活；同名重建会获得新的账号 id，不受历史拒绝记录影响。
+        """
+        approval = self.get_approval(approval_id)
+        if not approval or str(approval.get("kind")) != "admin_register":
+            return False, "审批记录不存在或类型不符"
+        if str(approval.get("status")) != "pending":
+            return False, "该审批已被处理"
+        if not self.review_approval(approval_id, "rejected", reviewer, note):
+            return False, "该审批已被处理"
+        try:
+            payload = json.loads(str(approval.get("payload") or "{}"))
+        except Exception:
+            payload = {}
+        admin_id = int((payload or {}).get("admin_id") or 0)
+        target = self.get_admin_by_id(admin_id) if admin_id else None
+        if target:
+            self.delete_admin(int(target["id"]))
+            return True, (
+                f"已拒绝，并删除账号 {target.get('username')}"
+                "（如需恢复，请重新创建并走服务器端审批）。"
+            )
+        return True, "已拒绝（对应账号已不存在）。"
+
     def apply_approval(self, approval_id: int, reviewer: str = "") -> tuple[bool, str]:
         """执行"已批准"审批对应的动作；返回 (ok, 说明)。
 
@@ -3785,7 +3838,7 @@ class Database:
             admin_id = int(payload.get("admin_id") or 0)
             if not self.get_admin_by_id(admin_id):
                 return False, "管理员不存在"
-            self.set_admin_status(admin_id, "active")
+            self.set_admin_status(admin_id, "active", force=True)
             return True, "管理员账号已启用。"
         if kind == "license_transfer":
             ok = self.transfer_portal_binding(
@@ -3877,6 +3930,25 @@ class Database:
             (f'%"admin_id":{aid},%', f'%"admin_id":{aid}}}%'),
         )
         return bool(row and int(row["n"]) > 0)
+
+    def admin_approval_block(self, admin_id: int) -> str:
+        """管理员"创建审批"阻断状态：''（无记录）/ 'pending' / 'rejected'。
+
+        'rejected' 包含服务端人工拒绝（账号通常已被销毁）；如遇历史残留
+        （账号仍在），同样禁止启用——只能删除后重新创建。
+        """
+        aid = int(admin_id or 0)
+        if not aid:
+            return ""
+        for state in ("pending", "rejected"):
+            row = self._fetchone(
+                "SELECT COUNT(*) AS n FROM approvals WHERE kind = 'admin_register'"
+                " AND status = ? AND (payload LIKE ? OR payload LIKE ?)",
+                (state, f'%"admin_id":{aid},%', f'%"admin_id":{aid}}}%'),
+            )
+            if row and int(row["n"]) > 0:
+                return state
+        return ""
 
     def review_approval(self, approval_id: int, status: str, reviewer: str = "",
                         note: str = "", *, only_pending: bool = True) -> bool:

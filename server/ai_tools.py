@@ -1026,9 +1026,24 @@ class ToolRegistry:
         ok, message = security.password_strength(password)
         if not ok:
             raise ToolError(message)
-        admin_id = self.db.create_admin(username, password, role)
-        self._log("AI创建管理员", operator, username, f"角色 {role}", ip)
-        return {"ok": True, "id": admin_id, "username": username, "role": role}
+        # 硬规则：AI 工具属于"主控端通道"——创建的管理员一律为待审批，
+        # 由服务器端审批后启用（与服务端界面/CLI 之外的路径保持同一口径）。
+        admin_id = self.db.create_admin(username, password, role, approved=False)
+        self.db.create_approval(
+            "admin_register",
+            f"AI:{operator.get('username', '')}",
+            username,
+            {"admin_id": admin_id, "username": username, "role": role},
+        )
+        self._log("AI创建管理员", operator, username, f"角色 {role} · 待服务端审批", ip)
+        return {
+            "ok": True,
+            "id": admin_id,
+            "username": username,
+            "role": role,
+            "pending_approval": True,
+            "message": "已提交服务器端审批，通过后自动启用（AI 创建同样需要审批）。",
+        }
 
     def _admin_status(self, args: dict, operator: dict, ip: str) -> dict:
         admin_id = _as_int(args["admin_id"], "admin_id", 1)
@@ -1042,6 +1057,14 @@ class ToolRegistry:
             raise ToolError("不能修改自己的状态")
         if target["role"] == "master":
             raise ToolError("不能禁用另一位主控账号")
+        if status == "active":
+            block = self.db.admin_approval_block(admin_id)
+            if block == "pending":
+                raise ToolError("该账号的创建申请尚未经服务器端审批，不能启用。")
+            if block == "rejected":
+                raise ToolError(
+                    "该账号的创建申请已被服务端拒绝，不能启用；请删除该账号。"
+                )
         self.db.set_admin_status(admin_id, status)
         self._log("AI修改管理员状态", operator, target["username"], status, ip)
         return {"ok": True, "admin_id": admin_id, "status": status}

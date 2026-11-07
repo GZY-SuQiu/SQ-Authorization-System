@@ -269,11 +269,15 @@ class AdminsPage(BasePage):
         self.admins = items
         rows = []
         for it in items:
+            block = it.get("review_block") or ("pending" if it.get("pending_review") else "")
+            label = {"pending": "待审批", "rejected": "审批被拒"}.get(
+                block, ADMIN_STATUS_TEXT.get(it["status"], it["status"])
+            )
             rows.append([
                 it["id"],
                 it["username"],
                 ROLE_TEXT.get(it["role"], it["role"]),
-                "待审批" if it.get("pending_review") else ADMIN_STATUS_TEXT.get(it["status"], it["status"]),
+                label,
                 mask_email(it.get("email") or ""),
                 "—",
                 it["created_at"],
@@ -281,8 +285,11 @@ class AdminsPage(BasePage):
             ])
         fill_table(self.table, rows)
         for row, item in enumerate(items):
-            if item.get("pending_review"):
+            block = item.get("review_block") or ("pending" if item.get("pending_review") else "")
+            if block == "pending":
                 self.table.setItem(row, 3, status_table_item("frozen", "待审批"))
+            elif block == "rejected":
+                self.table.setItem(row, 3, status_table_item("revoked", "审批被拒"))
             else:
                 self.table.setItem(
                     row, 3, status_table_item(item["status"], ADMIN_STATUS_TEXT.get(item["status"], item["status"]))
