@@ -2440,7 +2440,15 @@ def create_app(
 
     @app.get("/api/admin/list")
     def admin_list(admin: dict = Depends(require_master)):
-        return {"items": db.list_admins()}
+        items = db.list_admins()
+        for item in items:
+            try:
+                item["pending_review"] = db.has_pending_admin_approval(
+                    int(item.get("id") or 0)
+                )
+            except Exception:
+                item["pending_review"] = False
+        return {"items": items}
 
     @app.post("/api/admin/create")
     def admin_create(body: AdminCreateBody, admin: dict = Depends(require_master)):
@@ -2455,35 +2463,24 @@ def create_app(
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
         admin_id = db.create_admin(username, body.password, body.role)
-        review_required = bool(config.security.get("approval_enabled", True)) or bool(
-            getattr(body, "needs_approval", False)
+        # 硬规则：本 HTTP 端点即"主控端通道"——创建的管理员一律进入待审批，
+        # 由服务器端审批后启用（不受审批总开关影响；服务端界面与 CLI 走
+        # db 直连创建，天然免审批）。
+        db.set_admin_status(admin_id, "disabled")
+        db.create_approval(
+            "admin_register",
+            admin["username"],
+            username,
+            {"admin_id": admin_id, "username": username, "role": body.role},
         )
-        if review_required:
-            # 审批模式（主控端创建即进入；服务端直连创建不受限）：先禁用，
-            # 待服务端/主控端在审批中心批准后启用。
-            db.set_admin_status(admin_id, "disabled")
-            db.create_approval(
-                "admin_register",
-                admin["username"],
-                username,
-                {"admin_id": admin_id, "username": username, "role": body.role},
-            )
-            db.add_log(
-                "创建管理员",
-                admin["username"],
-                username,
-                f"角色 {body.role} · 待审批",
-                "",
-            )
-            return {"ok": True, "id": admin_id, "pending_approval": True}
         db.add_log(
             "创建管理员",
             admin["username"],
             username,
-            f"角色 {body.role}",
+            f"角色 {body.role} · 待服务端审批",
             "",
         )
-        return {"ok": True, "id": admin_id}
+        return {"ok": True, "id": admin_id, "pending_approval": True}
 
     @app.post("/api/admin/status")
     def admin_status(body: AdminStatusBody, admin: dict = Depends(require_master)):
@@ -2494,6 +2491,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="管理员不存在")
         if target["id"] == admin["id"]:
             raise HTTPException(status_code=400, detail="不能修改自己的状态")
+        if body.status == "active" and db.has_pending_admin_approval(target["id"]):
+            raise HTTPException(
+                status_code=400,
+                detail="该账号的创建申请尚未经服务器端审批——请在服务器端「审批中心」处理后自动启用。",
+            )
         if target["role"] == "master":
             raise HTTPException(status_code=403, detail="不能禁用另一位主控账号")
         db.set_admin_status(target["id"], body.status)
@@ -3124,6 +3126,11 @@ def create_app(
         approval = db.get_approval(approval_id)
         if not approval:
             raise HTTPException(status_code=404, detail="审批记录不存在")
+        if str(approval.get("kind")) == "admin_register":
+            raise HTTPException(
+                status_code=403,
+                detail="管理员账号创建审批只能在服务器端处理（防止主控端越权扩编）。",
+            )
         if str(approval.get("status")) != "pending":
             raise HTTPException(status_code=409, detail="该审批已被处理")
         if not db.review_approval(approval_id, "approved", admin["username"], note):
@@ -3168,6 +3175,11 @@ def create_app(
         approval = db.get_approval(approval_id)
         if not approval:
             raise HTTPException(status_code=404, detail="审批记录不存在")
+        if str(approval.get("kind")) == "admin_register":
+            raise HTTPException(
+                status_code=403,
+                detail="管理员账号创建审批只能在服务器端处理（防止主控端越权扩编）。",
+            )
         if not db.review_approval(approval_id, "rejected", admin["username"], note):
             raise HTTPException(status_code=409, detail="该审批已被处理")
         if str(approval.get("kind")) == "user_register":

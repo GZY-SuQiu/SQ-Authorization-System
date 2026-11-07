@@ -128,10 +128,10 @@ class CreateAdminDialog(QDialog):
             except ApiError as exc:
                 # The account exists already; failing to attach the address
                 # must not look like the creation itself failed.
-                self.notify(f"管理员已创建，但邮箱设置失败：{exc}", "warning")
+                self.notify(f"已提交服务器端审批，但邮箱设置失败：{exc}", "warning")
                 self.accept()
                 return
-        self.notify("管理员已创建", "success")
+        self.notify("已提交服务器端审批，通过后自动生效", "success")
         self.accept()
 
 
@@ -273,7 +273,7 @@ class AdminsPage(BasePage):
                 it["id"],
                 it["username"],
                 ROLE_TEXT.get(it["role"], it["role"]),
-                ADMIN_STATUS_TEXT.get(it["status"], it["status"]),
+                "待审批" if it.get("pending_review") else ADMIN_STATUS_TEXT.get(it["status"], it["status"]),
                 mask_email(it.get("email") or ""),
                 "—",
                 it["created_at"],
@@ -281,9 +281,12 @@ class AdminsPage(BasePage):
             ])
         fill_table(self.table, rows)
         for row, item in enumerate(items):
-            self.table.setItem(
-                row, 3, status_table_item(item["status"], ADMIN_STATUS_TEXT.get(item["status"], item["status"]))
-            )
+            if item.get("pending_review"):
+                self.table.setItem(row, 3, status_table_item("frozen", "待审批"))
+            else:
+                self.table.setItem(
+                    row, 3, status_table_item(item["status"], ADMIN_STATUS_TEXT.get(item["status"], item["status"]))
+                )
             self.table.setItem(row, 5, email_status_item(item))
         self.total_label.setText(f"共 {len(items)} 位")
 

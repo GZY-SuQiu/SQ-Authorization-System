@@ -154,6 +154,16 @@ class C1ApiTests(unittest.TestCase):
         self.master.approve_approval(int(approval["id"]), "测试批准")
         return approval
 
+    def _approve_admin_register_directly(self) -> dict:
+        """管理员创建审批：服务器端直连 db 处理（该类型 HTTP 端点已禁用）。"""
+        items, _ = self.db.list_approvals("admin_register", "pending")
+        self.assertTrue(items, "没有待处理的管理员创建审批")
+        approval = items[0]
+        self.db.review_approval(int(approval["id"]), "approved", "SQ.admin")
+        _ok, _detail = self.db.apply_approval(int(approval["id"]), "SQ.admin")
+        self.assertTrue(_ok)
+        return approval
+
     def _register_and_approve(self, email: str):
         """注册 → 批准 → 登录，返回已登录的 client。"""
         _, data = self._register(email)
@@ -242,8 +252,8 @@ class C1ApiTests(unittest.TestCase):
         )
         self.assertIn(blocked.status_code, (400, 401, 403))
 
-        # 审批通过后启用
-        approval = self._approve_pending("admin_register")
+        # 管理员创建审批只能服务器端处理 → 直连 db 批
+        approval = self._approve_admin_register_directly()
         self.assertEqual(approval.get("kind"), "admin_register")
         target = self.db.get_admin("newmaster")
         self.assertEqual(str(target["status"]), "active")
@@ -338,6 +348,57 @@ class C1ApiTests(unittest.TestCase):
         lic = self.db.get_license(key)
         self.assertIsNone(self.db.get_binding_by_license(int(lic["id"])))
 
+    def test_admin_register_http_review_forbidden(self):
+        """管理员创建审批：主控端 HTTP 不能批（防越权扩编），服务器端可批。"""
+        self.master._request(
+            "POST", "/api/admin/create",
+            json_body={"username": "hx", "password": "Hx#Pass2026", "role": "admin"},
+        )
+        items, _ = self.db.list_approvals("admin_register", "pending")
+        aid = int(items[0]["id"])
+        with self.assertRaises(Exception) as ctx:
+            self.master.approve_approval(aid, "试图批")
+        self.assertIn("服务器端", str(ctx.exception))
+        self.assertEqual(str(self.db.get_approval(aid)["status"]), "pending")
+        with self.assertRaises(Exception) as ctx2:
+            self.master.reject_approval(aid, "试图驳")
+        self.assertIn("服务器端", str(ctx2.exception))
+
+        # 服务器端直连可批
+        self.db.review_approval(aid, "approved", "SQ.admin")
+        ok, _detail = self.db.apply_approval(aid, "SQ.admin")
+        self.assertTrue(ok)
+        self.assertEqual(str(self.db.get_admin("hx")["status"]), "active")
+
+    def test_pending_admin_cannot_be_enabled_via_http(self):
+        """待审批账号不能通过"启用"按钮绕过审批。"""
+        self.master._request(
+            "POST", "/api/admin/create",
+            json_body={"username": "byp", "password": "Byp#Pass2026", "role": "admin"},
+        )
+        target = self.db.get_admin("byp")
+        self.assertEqual(str(target["status"]), "disabled")
+        with self.assertRaises(Exception) as ctx:
+            self.master._request(
+                "POST", "/api/admin/status",
+                json_body={"admin_id": int(target["id"]), "status": "active"},
+            )
+        self.assertIn("审批", str(ctx.exception))
+        self.assertEqual(str(self.db.get_admin("byp")["status"]), "disabled")
+
+    def test_delete_pending_admin_voids_approval(self):
+        """删除待审批账号 → 其审批自动作废（不悬挂）。"""
+        self.master._request(
+            "POST", "/api/admin/create",
+            json_body={"username": "dv", "password": "Dv#Pass2026", "role": "admin"},
+        )
+        target = self.db.get_admin("dv")
+        self.assertTrue(self.db.delete_admin(int(target["id"])))
+        pending_items, _ = self.db.list_approvals("admin_register", "pending")
+        self.assertEqual(pending_items, [])
+        rejected, _ = self.db.list_approvals("admin_register", "rejected")
+        self.assertTrue(any("账号已删除" in (a.get("review_note") or "") for a in rejected))
+
     def test_delete_admin_protection(self):
         # 1) 删除自己：拒绝
         admin = self.db.get_admin("admin")
@@ -351,7 +412,7 @@ class C1ApiTests(unittest.TestCase):
             "/api/admin/create",
             json_body={"username": "m2", "password": "M2Pass#2026", "role": "master"},
         )
-        self._approve_pending("admin_register")
+        self._approve_admin_register_directly()
         m2 = self.db.get_admin("m2")
         result = self.master.delete_admin(int(m2["id"]))
         self.assertTrue(result.get("ok"), result)

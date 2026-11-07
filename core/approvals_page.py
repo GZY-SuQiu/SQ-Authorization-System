@@ -114,6 +114,7 @@ class ApprovalCenterPage(BasePage):
         footer.addWidget(make_button("拒绝", "danger", lambda: self._review(False)))
         layout.addLayout(footer)
 
+        self._rows: list = []
         self._menu = QMenu(self)
         self._menu.addAction("通过", lambda: self._review(True))
         self._menu.addAction("拒绝", lambda: self._review(False))
@@ -133,6 +134,7 @@ class ApprovalCenterPage(BasePage):
             self.notify(str(exc), "error")
             return
         items = data.get("items") or []
+        self._rows = items
         self.table.setRowCount(0)
         for item in items:
             row = self.table.rowCount()
@@ -156,10 +158,9 @@ class ApprovalCenterPage(BasePage):
         if row < 0:
             self.notify("请先选择一条审批记录", "warning")
             return None
-        try:
-            return {"id": int(self.table.item(row, 0).text())}
-        except (AttributeError, ValueError):
+        if row >= len(self._rows):
             return None
+        return self._rows[row]
 
     def _ctx_menu(self, pos) -> None:
         if not self.table.indexAt(pos).isValid():
@@ -190,6 +191,14 @@ class ApprovalCenterPage(BasePage):
     def _review(self, approve: bool) -> None:
         current = self._current()
         if not current:
+            return
+        if str(current.get("kind")) == "admin_register":
+            QMessageBox.information(
+                self,
+                "仅服务器端可处理",
+                "管理员账号创建审批只能在服务器端处理——请等待服务器主人审批。\n"
+                "（该限制用于防止主控端越权扩编。）",
+            )
             return
         note, ok = QInputDialog.getText(
             self, "审批备注", "备注（可留空）：" if approve else "驳回原因（可留空）："

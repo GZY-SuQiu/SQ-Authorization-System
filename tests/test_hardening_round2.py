@@ -220,7 +220,8 @@ class AdminPasswordResetTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_reset_forces_the_admin_to_change_password(self):
-        self.client.create_admin("operator", "Operator#2026")
+        # 管理员创建走服务器端审批 → 该测试用 db 直连创建（测试主体是 reset 流程）
+        self.db.create_admin("operator", "Operator#2026")
         admin = next(
             item for item in self.client.list_admins()["items"]
             if item["username"] == "operator"

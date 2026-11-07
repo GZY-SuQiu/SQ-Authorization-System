@@ -698,7 +698,18 @@ class Database:
             cur = self._conn.execute(
                 "DELETE FROM admins WHERE id = ?", (int(admin_id or 0),)
             )
-            return cur.rowcount == 1
+            if cur.rowcount != 1:
+                return False
+            # 账号已删除：其待处理的创建审批自动作废（避免悬挂审批）。
+            aid = int(admin_id or 0)
+            self._conn.execute(
+                "UPDATE approvals SET status = 'rejected', reviewer = 'system',"
+                " review_note = '账号已删除', reviewed_at = ?"
+                " WHERE kind = 'admin_register' AND status = 'pending'"
+                " AND (payload LIKE ? OR payload LIKE ?)",
+                (security.now_str(), f'%"admin_id":{aid},%', f'%"admin_id":{aid}}}%'),
+            )
+            return True
 
     def set_admin_password(
         self, admin_id: int, password: str, must_change_password: bool = False
@@ -3852,6 +3863,18 @@ class Database:
             "SELECT COUNT(*) AS n FROM approvals WHERE kind = 'license_transfer'"
             " AND status = 'pending' AND payload LIKE ?",
             (f'%"license_id":{int(license_id or 0)}%',),
+        )
+        return bool(row and int(row["n"]) > 0)
+
+    def has_pending_admin_approval(self, admin_id: int) -> bool:
+        """该管理员是否有一笔"待处理"的创建审批（用于堵住启用绕过）。"""
+        aid = int(admin_id or 0)
+        if not aid:
+            return False
+        row = self._fetchone(
+            "SELECT COUNT(*) AS n FROM approvals WHERE kind = 'admin_register'"
+            " AND status = 'pending' AND (payload LIKE ? OR payload LIKE ?)",
+            (f'%"admin_id":{aid},%', f'%"admin_id":{aid}}}%'),
         )
         return bool(row and int(row["n"]) > 0)
 

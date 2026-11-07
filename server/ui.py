@@ -701,6 +701,14 @@ class AccountManagerDialog(QDialog):
         if str(target.get("status")) == status:
             self.hint.setText("该账号已处于目标状态。")
             return
+        if status == "active" and self.db.has_pending_admin_approval(int(target["id"])):
+            QMessageBox.information(
+                self,
+                "需先审批",
+                "该账号有待处理的服务端创建审批——\n"
+                "请到「审批中心」通过该申请，账号将自动启用。",
+            )
+            return
         if status == "disabled" and str(target.get("role")) == "master":
             actives = [
                 item
